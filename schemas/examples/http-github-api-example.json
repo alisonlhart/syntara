@@ -1,6 +1,7 @@
 {
   "$comment": "Example: Create GitHub issue via REST API with authentication",
   "nodeType": "http_request",
+  "category": "action",
   "inputs": {
     "url": "https://api.github.com/repos/syntara/orchestrator/issues",
     "method": "POST",

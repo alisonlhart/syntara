@@ -234,12 +234,20 @@
       "additionalProperties": false
     },
 
+    "NodeCategory": {
+      "type": "string",
+      "title": "Node Category",
+      "description": "Platform-wide node taxonomy classification. Categorizes nodes by their execution model and architectural role. Used for UI organization, routing decisions, and capability validation.",
+      "enum": ["action", "workflow", "task", "trigger"],
+      "examples": ["action", "workflow", "task", "trigger"]
+    },
+
     "WorkloadClassification": {
       "type": "string",
       "title": "Workload Classification",
-      "description": "Security classification determining the types of credentials the node may access. 'action' nodes (deterministic, scripted) can use infrastructure credentials (SSH, API keys). 'agentic' nodes (LLM-driven, non-deterministic) are blocked from infrastructure credentials to prevent prompt injection attacks from escalating to infrastructure compromise.",
-      "enum": ["action", "agentic"],
-      "default": "action"
+      "description": "Security classification determining the types of credentials the node may access. 'deterministic' nodes (scripted, predictable execution) can use infrastructure credentials (SSH, API keys). 'agentic' nodes (LLM-driven, non-deterministic) are blocked from infrastructure credentials to prevent prompt injection attacks from escalating to infrastructure compromise.",
+      "enum": ["deterministic", "agentic"],
+      "default": "deterministic"
     },
 
     "CredentialReference": {

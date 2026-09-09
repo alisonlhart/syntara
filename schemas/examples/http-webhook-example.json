@@ -1,6 +1,7 @@
 {
   "$comment": "Example: Simple GET request to public API (no authentication)",
   "nodeType": "http_request",
+  "category": "action",
   "inputs": {
     "url": "https://httpbin.org/get",
     "method": "GET",

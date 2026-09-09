@@ -87,11 +87,12 @@ Shared definitions referenced across all node types.
   }
   ```
 
+- **NodeCategory** - Platform-wide taxonomy (`"action"`, `"workflow"`, `"task"`, `"trigger"`)
 - **ResourceRequirements** - Kubernetes CPU/memory limits
 - **SchedulingControls** - Network egress allowlist + node affinity
 - **DependencyDeclaration** - Platform version + capability requirements
 - **ExecutionTimeout** - Max duration (1-86400 seconds)
-- **WorkloadClassification** - Security classification (`"action"` | `"agentic"`)
+- **WorkloadClassification** - Security classification for credential gating (`"deterministic"` | `"agentic"`)
 
 ### [`script.schema.json`](script.schema.json)
 Containerized Python 3.12 / Bash 5.2 executor.
@@ -130,6 +131,34 @@ HTTP/REST API orchestrator.
 **Examples:** [http-github-api-example.json](examples/http-github-api-example.json), [http-webhook-example.json](examples/http-webhook-example.json)
 
 ## Key Concepts
+
+### Node Taxonomy (4 Categories)
+
+All nodes are classified into one of four categories:
+
+| Category | Purpose | Examples |
+|----------|---------|----------|
+| **action** | Domain and API integrations | HTTP Request, REST API, AAP Job Templates |
+| **workflow** | In-memory control-plane logic | Loop, Condition, Switch, Sub-workflow |
+| **task** | Atomic compute and script executors | Python 3.12, Bash 5.2 |
+| **trigger** | Event entry points | Webhook, Schedule, Manual |
+
+**Example:**
+```json
+{
+  "nodeType": "script_executor",
+  "category": "task",
+  "inputs": {...}
+}
+```
+
+The `category` field is **required** and used for:
+- UI organization and filtering
+- Routing decisions
+- Capability validation
+- Architectural enforcement
+
+**Note:** `WorkloadClassification` (`"deterministic"` | `"agentic"`) is separate and used specifically for credential access control (preventing LLM-driven nodes from accessing infrastructure credentials).
 
 ### Backwards Compatibility
 

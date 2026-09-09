@@ -12,6 +12,12 @@
       "description": "Static node type identifier used by the platform to route execution to the correct worker container image."
     },
 
+    "category": {
+      "$ref": "common-definitions.json#/definitions/NodeCategory",
+      "const": "task",
+      "description": "Node category classification. Script executors are 'task' nodes - atomic compute and arbitrary code execution."
+    },
+
     "inputs": {
       "type": "object",
       "description": "Script execution parameters. These are serialized as JSON and streamed to the container's stdin. The worker process deserializes them and passes to the script runtime.",
@@ -151,7 +157,7 @@
     }
   },
 
-  "required": ["nodeType", "inputs", "outputs"],
+  "required": ["nodeType", "category", "inputs", "outputs"],
   "additionalProperties": false,
 
   "examples": [

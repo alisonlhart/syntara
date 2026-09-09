@@ -19,26 +19,30 @@ Schema-driven execution framework for the Syntara Automation Orchestrator. Defin
 ```mermaid
 graph TB
     subgraph COMMON["common-definitions.json"]
+        NC["NodeCategory"]
         SOW["StandardOutputWrapper"]
         CR["CredentialReference"]
         RR["ResourceRequirements"]
         SC["SchedulingControls"]
+        WC["WorkloadClassification"]
     end
 
-    subgraph SCRIPT["script.schema.json"]
+    subgraph SCRIPT["script.schema.json<br/>(category: task)"]
         S_IN["inputs: script, language, args"]
         S_SEC["secrets: $ref CR"]
         S_OUT["outputs: $ref SOW"]
-        S_META["metadata: $ref RR, SC"]
+        S_META["metadata: $ref RR, SC, WC"]
     end
 
-    subgraph HTTP["http_request.schema.json"]
+    subgraph HTTP["http_request.schema.json<br/>(category: action)"]
         H_IN["inputs: url, method, body"]
         H_SEC["secrets: $ref CR"]
         H_OUT["outputs: $ref SOW"]
         H_META["metadata: $ref RR, SC"]
     end
 
+    NC -.->|$ref| SCRIPT
+    NC -.->|$ref| HTTP
     SOW -.->|$ref| S_OUT
     SOW -.->|$ref| H_OUT
     CR -.->|$ref| S_SEC
@@ -47,16 +51,28 @@ graph TB
     RR -.->|$ref| H_META
     SC -.->|$ref| S_META
     SC -.->|$ref| H_META
+    WC -.->|$ref| S_META
 ```
 
 **Key Definitions:**
 
 | Definition | Purpose | Schema Property |
 |---|---|---|
+| **NodeCategory** | Platform-wide taxonomy (required) | `enum: ["action", "workflow", "task", "trigger"]` |
 | **StandardOutputWrapper** | Immutable output contract | `{Result, StatusCode, StatusMessage, ErrorMessage}` |
 | **CredentialReference** | UUID-based resource reference | `{credential_id, credential_mount_type}` |
 | **ResourceRequirements** | Kubernetes resource limits | `{limits: {cpu, memory}, requests: {cpu, memory}}` |
 | **SchedulingControls** | Network egress + affinity | `{connectivity_requirements, affinity_labels}` |
+| **WorkloadClassification** | Credential access control | `enum: ["deterministic", "agentic"]` |
+
+**Node Taxonomy:**
+
+| Category | Purpose | Schema Examples |
+|----------|---------|-----------------|
+| `action` | Domain and API integrations | `http_request`, AAP Job Templates |
+| `workflow` | In-memory control-plane logic | Loop, Condition, Switch |
+| `task` | Atomic compute and script executors | `script_executor` (Python, Bash) |
+| `trigger` | Event entry points | Webhook, Schedule, Manual |
 
 ## Resource Injection Flow
 

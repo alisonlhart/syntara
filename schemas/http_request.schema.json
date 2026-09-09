@@ -12,6 +12,12 @@
       "description": "Static node type identifier used by the platform to route execution to the correct worker container image."
     },
 
+    "category": {
+      "$ref": "common-definitions.json#/definitions/NodeCategory",
+      "const": "action",
+      "description": "Node category classification. HTTP request nodes are 'action' nodes - domain and API integrations."
+    },
+
     "inputs": {
       "type": "object",
       "description": "HTTP request configuration. These parameters are serialized as JSON and passed to the containerized HTTP client worker. The worker validates the URL, resolves credentials, compiles headers, and executes the request.",
@@ -271,7 +277,7 @@
     }
   },
 
-  "required": ["nodeType", "inputs", "outputs"],
+  "required": ["nodeType", "category", "inputs", "outputs"],
   "additionalProperties": false,
 
   "examples": [

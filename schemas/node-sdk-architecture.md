@@ -1,289 +1,440 @@
 # Node SDK Architecture
 
-Schema-driven execution framework for the Syntara Automation Orchestrator. Defines the structure, resource injection model, and execution contracts for custom automation nodes.
+Target-state specification for the Syntara Node SDK: the schema-driven framework that defines how custom automation nodes are authored, packaged, registered, and handed off to the execution plane. This document is the authoritative reference for the node taxonomy, the authoring and compilation format, the registry database and API, and the dynamic dispatch contract.
+
+The specification deliberately **shifts left**: it centers on the *definition* of a node — what a node declares about itself — and treats the execution plane as a black box that consumes a well-defined handoff contract. Execution mechanics (pod provisioning, streaming, cleanup) are described only to the extent needed to define the contract.
 
 ## Architecture Principles
 
-1. **Schemas as Single Source of Truth.** All node metadata (inputs, outputs, resources) declared in JSON Schema (Draft-07). Frontend and backend consume the same schemas.
+1. **YAML Authoring, JSON Registry.** Developers author `manifest.yaml` (human-friendly, supports comments). The SDK validates against JSON Schema (Draft-07) and compiles to `node-definition.json` for registry storage. The compiled artifact is the single source of truth the frontend and backend consume, enabling <500ms canvas form rendering.
 
-2. **Strict Backwards Compatibility.** `StandardOutputWrapper` (Result, StatusCode, StatusMessage, ErrorMessage) is immutable. Template expressions like `${task.Result.stdout}` never break.
+2. **Four-Category Taxonomy.** Every node declares exactly one of four categories: `action`, `task`, `workflow`, `trigger`. Category, together with `execution_type`, determines routing and validation.
 
-3. **Zero-Trust Resources.** Workflows store only UUID references. Scheduler resolves at runtime, injects via tmpfs or env vars. No raw secrets in definitions.
+3. **Explicit Execution Plane.** Every node declares an `execution_type` of `in_process` or `container`. This value is the fork point for dynamic dispatch — it decides whether the node runs as a built-in Temporal activity or is handed off to an isolated worker pod.
 
-4. **Language-Agnostic.** JSON payload → stdin, results ← stdout. Works with any runtime.
+4. **Strict Backwards Compatibility.** `StandardOutputWrapper` (`Result`, `StatusCode`, `StatusMessage`, `ErrorMessage`) is immutable. Template expressions like `${task.Result.stdout}` never break across node versions.
 
-5. **Manifest-Declared Permissions.** Nodes declare capabilities. Scheduler enforces via NetworkPolicies before execution.
+5. **Zero-Trust Resources.** Node definitions store only UUID references (`abstract_credential_uuids`). The orchestrator resolves them at runtime and injects via tmpfs or env vars. No raw secrets ever appear in a definition.
 
-## Schema Structure
+6. **Manifest-Declared Permissions.** Nodes declare their capabilities and connectivity in the manifest. Administrators can statically inspect and audit these `declared_capabilities` before any container executes.
+
+## Core Architectural Standards & Taxonomy
+
+### Node Category Taxonomy
+
+The platform recognizes exactly four categories, defined canonically as `NodeCategory` in `common-definitions.json`:
+
+```json
+"enum": ["action", "task", "workflow", "trigger"]
+```
+
+| Category | Purpose | Typical `execution_type` | Examples |
+|----------|---------|--------------------------|----------|
+| `action` | Domain and external API integrations | `container` | `http_request`, AAP Job Templates |
+| `task` | Atomic compute and script executors | `container` | `script_executor` (Python 3.12, Bash 5.2) |
+| `workflow` | In-memory control-plane logic | `in_process` | Loop, Condition, Switch, Converge |
+| `trigger` | Event entry points | `in_process` | Webhook, Schedule, Manual, `subworkflow_trigger` |
+
+### Execution Type
+
+`NodeExecutionType` (`common-definitions.json`) captures *where* a node runs:
+
+```json
+"enum": ["in_process", "container"]
+```
+
+- **`in_process`** — executed inline as a built-in Temporal activity inside the orchestrator process. Reserved for control-plane `workflow` logic and `trigger` nodes that need no isolated runtime.
+- **`container`** — dispatched to an isolated worker pod (the execution plane). Reserved for `action` and `task` nodes that run user or integration code under strict resource and network isolation.
+
+### The `subworkflow_trigger` Node
+
+`subworkflow_trigger` is a dedicated, first-class node type that lets a parent workflow invoke a child workflow as a composable, reusable unit.
+
+- **Category:** `trigger`
+- **Execution type:** `in_process`
+- **Reference implementation:** [examples/subworkflow-trigger/](examples/subworkflow-trigger/)
+
+It runs in-process as a built-in Temporal activity: it accepts the **parent workflow context**, an **ingress payload schema** (the parent↔child contract), and the **caller execution ID**, then hands control to the referenced child workflow. It returns a `StandardOutputWrapper` whose `Result` carries the child workflow's terminal output, so downstream parent nodes can reference it via stable template expressions (e.g., `${call_child.Result.summary}`). The orchestrator tracks invocation `depth` to bound recursion.
+
+### `manifest.yaml` — The Developer Authoring Format
+
+Developers author a single `manifest.yaml`. It is:
+
+- **Human-friendly** — supports comments and multi-line strings.
+- **Validated** — checked against JSON Schema (Draft-07) referencing `common-definitions.json`.
+- **Compiled** — `ao-sdk build` produces `node-definition.json`, the artifact stored in the registry and served to the canvas.
+
+The compiled `node-definition.json` — not the source `manifest.yaml` — is what the registry persists and what the React canvas loads to render input forms in under 500ms.
+
+**Standard Package Layout:**
+```
+my-custom-node/
+├── manifest.yaml              # Primary authoring manifest (YAML, source of truth for authoring)
+├── main.py                    # Imperative execution code (or main.sh for Bash)
+├── requirements.txt           # Python dependencies (optional)
+├── README.md                  # Node documentation
+└── tests/
+    └── test_main.py           # Unit tests
+```
+
+### Diagram 1 — Node Definition Composition (`manifest.yaml`)
+
+Structural breakdown of what a `manifest.yaml` composes. This is the "what" of a node — its declared shape, independent of how it runs.
 
 ```mermaid
 graph TB
-    subgraph COMMON["common-definitions.json"]
-        NC["NodeCategory"]
-        SOW["StandardOutputWrapper"]
-        CR["CredentialReference"]
-        RR["ResourceRequirements"]
-        SC["SchedulingControls"]
-        WC["WorkloadClassification"]
+    MANIFEST["manifest.yaml<br/>(authoring source)"]
+
+    subgraph COMPOSITION["Node Definition Composition"]
+        META["metadata<br/>• name, category<br/>• execution_type<br/>• workload_classification"]
+        INPUTS["inputs<br/>• typed properties<br/>• required / enum / pattern"]
+        OUTPUTS["outputs<br/>StandardOutputWrapper<br/>{Result, StatusCode,<br/>StatusMessage, ErrorMessage}"]
+        CREDS["credential_references<br/>abstract UUIDs only<br/>(CredentialReference)"]
+        SCHED["scheduling_controls<br/>• connectivity_requirements<br/>• affinity_labels"]
     end
 
-    subgraph SCRIPT["script.schema.json<br/>(category: task)"]
-        S_IN["inputs: script, language, args"]
-        S_SEC["secrets: $ref CR"]
-        S_OUT["outputs: $ref SOW"]
-        S_META["metadata: $ref RR, SC, WC"]
-    end
+    MANIFEST --> META
+    MANIFEST --> INPUTS
+    MANIFEST --> OUTPUTS
+    MANIFEST --> CREDS
+    MANIFEST --> SCHED
 
-    subgraph HTTP["http_request.schema.json<br/>(category: action)"]
-        H_IN["inputs: url, method, body"]
-        H_SEC["secrets: $ref CR"]
-        H_OUT["outputs: $ref SOW"]
-        H_META["metadata: $ref RR, SC"]
-    end
-
-    NC -.->|$ref| SCRIPT
-    NC -.->|$ref| HTTP
-    SOW -.->|$ref| S_OUT
-    SOW -.->|$ref| H_OUT
-    CR -.->|$ref| S_SEC
-    CR -.->|$ref| H_SEC
-    RR -.->|$ref| S_META
-    RR -.->|$ref| H_META
-    SC -.->|$ref| S_META
-    SC -.->|$ref| H_META
-    WC -.->|$ref| S_META
+    META -.->|$ref| CD["common-definitions.json"]
+    OUTPUTS -.->|$ref| CD
+    CREDS -.->|$ref| CD
+    SCHED -.->|$ref| CD
 ```
 
-**Key Definitions:**
+### Diagram 2 — SDK Authoring & Packaging Lifecycle
 
-| Definition | Purpose | Schema Property |
-|---|---|---|
-| **NodeCategory** | Platform-wide taxonomy (required) | `enum: ["action", "workflow", "task", "trigger"]` |
-| **StandardOutputWrapper** | Immutable output contract | `{Result, StatusCode, StatusMessage, ErrorMessage}` |
-| **CredentialReference** | UUID-based resource reference | `{credential_id, credential_mount_type}` |
-| **ResourceRequirements** | Kubernetes resource limits | `{limits: {cpu, memory}, requests: {cpu, memory}}` |
-| **SchedulingControls** | Network egress + affinity | `{connectivity_requirements, affinity_labels}` |
-| **WorkloadClassification** | Credential access control | `enum: ["deterministic", "agentic"]` |
+The developer lifecycle from scaffold to registry handoff. Every stage operates on the *definition*; the orchestrator only appears at the end, receiving a contract.
 
-**Node Taxonomy:**
-
-| Category | Purpose | Schema Examples |
-|----------|---------|-----------------|
-| `action` | Domain and API integrations | `http_request`, AAP Job Templates |
-| `workflow` | In-memory control-plane logic | Loop, Condition, Switch |
-| `task` | Atomic compute and script executors | `script_executor` (Python, Bash) |
-| `trigger` | Event entry points | Webhook, Schedule, Manual |
-
-## Resource Injection Flow
-
-Credentials, inventory, projects, and all platform resources follow the same UUID → runtime resolution pattern.
-
-```mermaid
-sequenceDiagram
-    participant Workflow as Workflow Definition
-    participant Scheduler
-    participant Vault as Credential Vault
-    participant K8s as Kubernetes
-    participant Worker as Worker Pod
-
-    Workflow->>Scheduler: credential_id: "550e8400-..."
-    Scheduler->>Scheduler: Validate UUID exists
-    Scheduler->>Vault: Decrypt credential
-    Vault-->>Scheduler: {type: "SSH_Key", data: {...}}
-    
-    alt credential_mount_type: env
-        Scheduler->>K8s: Create Secret (env vars)
-        K8s->>Worker: Mount as ENV: API_KEY=...
-    else credential_mount_type: file
-        Scheduler->>K8s: Create Secret (tmpfs volume)
-        K8s->>Worker: Mount at /run/secrets/ssh-key
-    end
-    
-    Worker->>Worker: Execute script
-    Worker->>Scheduler: Return StandardOutputWrapper
-    Scheduler->>K8s: Delete Secret (30s async)
-```
-
-**Flow Steps:**
-
-1. **Workflow Definition** stores `credential_id: "550e8400-..."` (UUID only, no raw data)
-2. **Deployment Validation** checks UUID exists and user has RBAC access
-3. **Runtime Resolution** scheduler calls credential service, decrypts from vault
-4. **Injection Strategy** based on `credential_mount_type`:
-   - `env`: Create K8s Secret → mount as environment variables
-   - `file`: Create K8s Secret → mount as tmpfs volume (RAM-backed)
-5. **Worker Execution** script accesses via `os.environ['API_KEY']` or `open('/run/secrets/ssh-key')`
-6. **Cleanup** K8s deletes Secret on pod exit
-
-**Security Properties:**
-- ✅ Workflows are auditable (UUIDs in Git, not secrets)
-- ✅ Credentials can be rotated without updating workflows
-- ✅ RBAC enforced at resolution time
-- ✅ Secrets never appear in logs
-- ✅ tmpfs mounts are RAM-only (never persisted to disk)
-
-## Schema → Execution Flow
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant Frontend as React UI
-    participant Backend as Syntara API
-    participant Scheduler
-    participant Worker as Worker Pod
-
-    User->>Frontend: Drag script node onto canvas
-    Frontend->>Frontend: Load script.schema.json
-    Frontend->>Frontend: Render form from inputs.properties
-    User->>Frontend: Fill script, language="python3"
-    Frontend->>Frontend: Validate against schema (ajv)
-    Frontend->>Backend: POST /workflows (save definition)
-    
-    Backend->>Scheduler: Execute workflow
-    Scheduler->>Scheduler: Load node schema
-    Scheduler->>Scheduler: Extract connectivity_requirements
-    Scheduler->>Scheduler: Compile NetworkPolicy
-    Scheduler->>Scheduler: Resolve credential_id UUID
-    Scheduler->>Worker: Provision pod + inject resources
-    Scheduler->>Worker: Stream JSON payload → stdin
-    Worker->>Worker: Execute script
-    Worker->>Scheduler: Stream StandardOutputWrapper → stdout
-    Scheduler->>Backend: Persist results
-    Backend->>User: Workflow completed
-```
-
-**Key Integration Points:**
-
-| Component | Schema Usage | Action |
-|---|---|---|
-| **React Frontend** | Parse `inputs.properties` | Render PatternFly forms (<500ms) |
-| **Client Validator** | Validate against `required`, `pattern`, `enum` | Inline validation (<50ms/keystroke) |
-| **Backend API** | Store workflow definition | Persist to PostgreSQL |
-| **Scheduler** | Extract `connectivity_requirements` | Compile OpenShift NetworkPolicy |
-| **Scheduler** | Extract `resource_requirements` | Map to Kubernetes resources spec |
-| **Scheduler** | Resolve `credential_id` | Decrypt from vault, create K8s Secret |
-| **Worker Pod** | Receive JSON via stdin | Deserialize, execute, return `StandardOutputWrapper` |
-
-## Network Policy Compilation
-
-The scheduler dynamically compiles OpenShift NetworkPolicies from schema declarations.
+**Note:** `ao-sdk` CLI is a future tool. Current workflow uses `build-manifest.sh` for YAML → JSON compilation.
 
 ```mermaid
 graph LR
-    subgraph SCHEMA["Node Schema"]
-        URL["inputs.url:<br/>https://api.github.com/repos"]
-        CONN["scheduling_controls.<br/>connectivity_requirements:<br/>['pypi.org']"]
-    end
+    INIT["ao-sdk init<br/>(Scaffold package)<br/><i>Future</i>"]
+    AUTHOR["Author<br/>manifest.yaml"]
+    VALIDATE["ao-sdk validate<br/>Draft-07 check vs<br/>common-definitions.json<br/><i>Future</i>"]
+    BUILD["ao-sdk build<br/>Compile →<br/>node-definition.json<br/><i>Future: build-manifest.sh interim</i>"]
+    PUBLISH["Registry Publish<br/>POST /api/v1/node-types"]
+    HANDOFF["Handoff Contract<br/>to Orchestrator"]
 
-    subgraph COMPILER["NetworkPolicy Compiler"]
-        EXTRACT["Extract hostnames"]
-        DNS["Resolve DNS"]
-        YAML["Generate YAML"]
-    end
-
-    subgraph K8S["OpenShift"]
-        NETPOL["NetworkPolicy:<br/>Allow TCP/443 to:<br/>• 140.82.112.0/24<br/>• 151.101.0.0/16"]
-        POD["Worker Pod"]
-    end
-
-    URL --> EXTRACT
-    CONN --> EXTRACT
-    EXTRACT -->|api.github.com<br/>pypi.org| DNS
-    DNS --> YAML
-    YAML --> NETPOL
-    NETPOL --> POD
+    INIT --> AUTHOR
+    AUTHOR --> VALIDATE
+    VALIDATE -->|Pass| BUILD
+    VALIDATE -.->|Fail: schema errors| AUTHOR
+    BUILD --> PUBLISH
+    PUBLISH --> HANDOFF
 ```
 
-**Example:**
+## Database Schema & Registry API
 
-**Schema declares:**
+The registry persists compiled node definitions in PostgreSQL and exposes them through a versioned REST API.
+
+### `node_types` Table (DDL)
+
+```sql
+CREATE TABLE node_types (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name           TEXT NOT NULL,
+    category       TEXT NOT NULL
+                     CHECK (category IN ('action', 'task', 'workflow', 'trigger')),
+    execution_type TEXT NOT NULL
+                     CHECK (execution_type IN ('in_process', 'container')),
+    descriptor     JSONB NOT NULL,          -- compiled node-definition.json
+    image_ref      TEXT,                     -- container image (NULL for in_process nodes)
+    version        TEXT NOT NULL DEFAULT '1.0.0',
+    enabled        BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (name, version)
+);
+
+-- Container-backed nodes must declare an image; in_process nodes must not.
+ALTER TABLE node_types ADD CONSTRAINT node_types_image_ref_by_execution_type
+    CHECK (
+        (execution_type = 'container'  AND image_ref IS NOT NULL) OR
+        (execution_type = 'in_process' AND image_ref IS NULL)
+    );
+
+-- GIN index for querying declared capabilities / connectivity inside the descriptor.
+CREATE INDEX idx_node_types_descriptor ON node_types USING GIN (descriptor);
+CREATE INDEX idx_node_types_category   ON node_types (category);
+CREATE INDEX idx_node_types_enabled    ON node_types (enabled);
+```
+
+### `NodeTypeDescriptor` (SQLModel / Pydantic)
+
+Per project standards, a single SQLModel class serves as both the database table and the API schema.
+
+```python
+from datetime import datetime
+from enum import StrEnum
+from typing import Any
+from uuid import UUID, uuid4
+
+from sqlalchemy import CheckConstraint, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlmodel import Column, Field, SQLModel
+
+
+class NodeCategory(StrEnum):
+    ACTION = "action"
+    TASK = "task"
+    WORKFLOW = "workflow"
+    TRIGGER = "trigger"
+
+
+class NodeExecutionType(StrEnum):
+    IN_PROCESS = "in_process"
+    CONTAINER = "container"
+
+
+class NodeTypeDescriptor(SQLModel, table=True):
+    """Registry record for a single compiled node definition.
+
+    `descriptor` holds the compiled node-definition.json produced by
+    `ao-sdk build`; it is the contract the orchestrator hands to the
+    execution plane. `image_ref` is required for container nodes and
+    forbidden for in_process nodes (enforced by a table CHECK constraint).
+    """
+
+    __tablename__ = "node_types"
+    __table_args__ = (
+        UniqueConstraint("name", "version", name="uq_node_types_name_version"),
+        CheckConstraint(
+            "(execution_type = 'container' AND image_ref IS NOT NULL) OR "
+            "(execution_type = 'in_process' AND image_ref IS NULL)",
+            name="node_types_image_ref_by_execution_type",
+        ),
+    )
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    name: str = Field(index=True)
+    category: NodeCategory = Field(index=True)
+    execution_type: NodeExecutionType
+    descriptor: dict[str, Any] = Field(sa_column=Column(JSONB, nullable=False))
+    image_ref: str | None = Field(default=None)
+    version: str = Field(default="1.0.0")
+    enabled: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+```
+
+### Registry REST API — `/api/v1/node-types`
+
+All responses use the platform's standard envelope. Single-resource responses wrap the record; list responses include pagination metadata.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/v1/node-types` | Register (publish) a compiled node definition |
+| `GET` | `/api/v1/node-types` | List registered node types (filter by `category`, `execution_type`, `enabled`) |
+| `GET` | `/api/v1/node-types/{id}` | Fetch a single node type descriptor |
+| `PATCH` | `/api/v1/node-types/{id}` | Update mutable fields (`enabled`, `image_ref`, `descriptor` for a new version) |
+| `DELETE` | `/api/v1/node-types/{id}` | Remove a node type from the registry |
+
+**`POST /api/v1/node-types`** — request body is the compiled `node-definition.json` plus registry metadata:
+
 ```json
 {
-  "inputs": {
-    "url": "https://api.github.com/repos/owner/repo"
-  },
-  "metadata": {
-    "scheduling_controls": {
-      "connectivity_requirements": ["pypi.org"]
-    }
+  "name": "script_executor",
+  "category": "task",
+  "execution_type": "container",
+  "image_ref": "registry.syntara.io/nodes/script-executor:1.0.0",
+  "version": "1.0.0",
+  "descriptor": { "...": "compiled node-definition.json" }
+}
+```
+
+Response `201 Created`:
+
+```json
+{
+  "data": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "name": "script_executor",
+    "category": "task",
+    "execution_type": "container",
+    "image_ref": "registry.syntara.io/nodes/script-executor:1.0.0",
+    "version": "1.0.0",
+    "enabled": true,
+    "descriptor": { "...": "compiled node-definition.json" },
+    "created_at": "2026-09-09T12:00:00Z",
+    "updated_at": "2026-09-09T12:00:00Z"
   }
 }
 ```
 
-**Scheduler compiles:**
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-spec:
-  podSelector:
-    matchLabels:
-      task-id: "12345"
-  policyTypes: [Egress]
-  egress:
-    - to:
-        - ipBlock: {cidr: 140.82.112.0/24}  # api.github.com
-      ports: [{protocol: TCP, port: 443}]
-    - to:
-        - ipBlock: {cidr: 151.101.0.0/16}   # pypi.org
-      ports: [{protocol: TCP, port: 443}]
-```
+**`GET /api/v1/node-types?category=task&enabled=true`** — list envelope:
 
-**Result:**
-- ✅ `curl https://api.github.com` → Success
-- ✅ `pip install requests` → Success (downloads from pypi.org)
-- ❌ `curl https://malicious.com` → Timeout (blocked)
-
-## Extending to New Resource Types
-
-The UUID-reference pattern is universal. For inventory, projects, or custom resources:
-
-**Add to `common-definitions.json`:**
 ```json
 {
-  "InventoryReference": {
-    "type": "object",
-    "properties": {
-      "inventory_id": {"type": "string", "format": "uuid"},
-      "inventory_mount_type": {"enum": ["file", "env"]},
-      "inventory_format": {"enum": ["ini", "yaml", "json"]}
-    },
-    "required": ["inventory_id"]
-  }
+  "data": [
+    { "id": "550e8400-...", "name": "script_executor", "category": "task", "execution_type": "container", "enabled": true }
+  ],
+  "meta": { "total": 1, "limit": 50, "offset": 0 }
 }
 ```
 
-**Use in node schemas:**
+**`PATCH /api/v1/node-types/{id}`** — partial update; returns the updated record in the `data` envelope:
+
 ```json
-{
-  "nodeType": "ansible_playbook",
-  "inputs": {...},
-  "resources": {
-    "credentials": {"$ref": "#/definitions/CredentialReference"},
-    "inventory": {"$ref": "#/definitions/InventoryReference"}
-  }
-}
+{ "enabled": false }
 ```
 
-**Scheduler follows same pattern:**
-1. Validate `inventory_id` exists
-2. Resolve from inventory service
-3. Serialize as YAML/INI/JSON
-4. Mount as tmpfs file at `/workspace/inventory.yaml`
+**`DELETE /api/v1/node-types/{id}`** — returns `204 No Content` on success, `404` if the id is unknown.
 
-## Component Mapping
+## Dynamic Dispatch Logic (`dynamic_workflow.py`)
 
-| Component | Location | Purpose |
+The orchestrator's workflow engine forks execution on a node's `execution_type`. This fork is the boundary between the control plane and the execution plane.
+
+```mermaid
+graph TB
+    NODE["Node to execute<br/>(from workflow graph)"]
+    FORK{"execution_type?"}
+
+    subgraph INPROC["in_process — built-in Temporal activities"]
+        WF["workflow nodes<br/>Loop / Condition / Switch / Converge"]
+        TRIG["trigger nodes<br/>Webhook / Schedule / Manual"]
+        SUBWF["subworkflow_trigger<br/>(invoke child workflow)"]
+    end
+
+    subgraph CONTAINER["container — execution plane (worker pods)"]
+        ACT["action nodes<br/>http_request, AAP templates"]
+        TASK["task nodes<br/>script_executor"]
+    end
+
+    NODE --> FORK
+    FORK -->|in_process| INPROC
+    FORK -->|container| CONTAINER
+    INPROC --> RESULT["StandardOutputWrapper"]
+    CONTAINER --> RESULT
+```
+
+- **`in_process` branch** — the engine dispatches the node as a built-in Temporal activity within the orchestrator process. This path serves control-plane `workflow` logic and `trigger` nodes, including `subworkflow_trigger`, which starts a child workflow and awaits its terminal output.
+- **`container` branch** — the engine resolves credentials and connectivity, then hands the node's descriptor to the execution plane, which provisions an isolated worker pod. This path serves `action` and `task` nodes.
+
+Both branches return the identical `StandardOutputWrapper` envelope, so downstream nodes are agnostic to where a node ran.
+
+### Diagram 3 — Execution Plane Handoff Contract
+
+The exact contract the control plane hands to the execution plane for a `container` node, and the envelope that returns. The execution plane details are intentionally ignored: this diagram fixes only the inputs and outputs at its boundary.
+
+```mermaid
+graph LR
+    subgraph CONTROL["Control Plane (Orchestrator)"]
+        DESC["node-definition.json<br/>descriptor"]
+    end
+
+    subgraph CONTRACT["Handoff Contract →"]
+        C1["image_ref"]
+        C2["input_schema<br/>(+ resolved inputs)"]
+        C3["abstract_credential_uuids"]
+        C4["declared_capabilities"]
+    end
+
+    subgraph PLANE["Execution Plane<br/>(BLACK BOX — worker pod)"]
+        BB["Provision · Inject ·<br/>Execute · Clean up"]
+    end
+
+    subgraph RETURN["← StandardOutputWrapper"]
+        R1["Result"]
+        R2["StatusCode"]
+        R3["StatusMessage"]
+        R4["ErrorMessage"]
+    end
+
+    DESC --> C1 --> BB
+    DESC --> C2 --> BB
+    DESC --> C3 --> BB
+    DESC --> C4 --> BB
+    BB --> R1
+    BB --> R2
+    BB --> R3
+    BB --> R4
+```
+
+### Diagram 4 — Declared Capabilities & Permission Manifest
+
+Static administrative inspection. Before any container runs, an administrator (or an automated policy gate) can audit exactly what a node is permitted to do, purely from its declared manifest.
+
+```mermaid
+graph TB
+    subgraph MANIFEST["Declared Permission Manifest (static)"]
+        WC["workload_classification<br/>action | agentic"]
+        CONN["scheduling_controls.<br/>connectivity_requirements<br/>(egress allowlist)"]
+        CAPS["dependencies.capabilities<br/>(SCC / NetworkPolicy tags)"]
+    end
+
+    subgraph AUDIT["Static Administrative Inspection"]
+        REVIEW["Security review /<br/>policy gate"]
+        DECISION{"Approve for<br/>execution?"}
+    end
+
+    WC --> REVIEW
+    CONN --> REVIEW
+    CAPS --> REVIEW
+    REVIEW --> DECISION
+    DECISION -->|Approved| ALLOW["Eligible for<br/>container execution"]
+    DECISION -->|Rejected| BLOCK["Blocked before<br/>any pod is provisioned"]
+```
+
+Key inspection points, all resolvable without executing the node:
+
+- **`workload_classification`** (`action` | `agentic`) — gates which credential classes the node may access; `agentic` nodes are blocked from infrastructure credentials.
+- **`connectivity_requirements`** — the declared egress allowlist, from which the orchestrator compiles a restrictive NetworkPolicy.
+- **`declared_capabilities`** — SCC / NetworkPolicy tags (e.g., `network-egress`, `script-execution`) validated against cluster policy.
+
+## Schema Reference
+
+### Platform Meta-Schema
+
+The schema files under `syntara/schemas/` implement the standards above. The platform maintains a **single meta-schema** that defines shared types, enums, and validation rules:
+
+| File | Role |
+|------|------|
+| `common-definitions.json` | **Sole platform meta-schema** — defines `NodeCategory`, `NodeExecutionType`, `WorkloadClassification`, `StandardOutputWrapper`, `CredentialReference`, `ResourceRequirements`, `SchedulingControls`, and `DependencyDeclaration` |
+
+Individual node schemas are **not** maintained as separate `.schema.json` files. Instead:
+
+1. **Developers author** `manifest.yaml` instances (e.g., `script_executor/manifest.yaml`, `http_request/manifest.yaml`, `subworkflow_trigger/manifest.yaml`)
+2. **The SDK compiles** each manifest into a `node-definition.json` build artifact via `ao-sdk build`
+3. **The registry persists** the compiled `node-definition.json` in the `node_types.descriptor` JSONB column
+4. **The orchestrator and canvas consume** the compiled artifact, not the source manifest
+
+`common-definitions.json` is the authoritative source for shared platform types. All `manifest.yaml` instances reference these definitions via `$ref` during validation; after compilation, the resulting `node-definition.json` inherits these constraints.
+
+### Key Common Definitions
+
+| Definition | Purpose | Shape |
 |---|---|---|
-| **JSON Schemas** | `syntara/schemas/*.json` | Define node contracts (inputs, outputs, metadata) |
-| **Schema Loader** | React component | Fetch and parse schemas (<100ms) |
-| **Form Renderer** | React component | Map schemas to PatternFly forms (<500ms) |
-| **Workflow API** | FastAPI router | Persist definitions to PostgreSQL |
-| **NetworkPolicy Compiler** | Scheduler library | Extract `connectivity_requirements` → YAML |
-| **Credential Resolver** | Scheduler library | Resolve `credential_id` → decrypt from vault |
-| **Worker Provisioner** | Scheduler library | Create K8s Pod + inject resources |
+| `NodeCategory` | Four-category taxonomy | `enum: ["action", "task", "workflow", "trigger"]` |
+| `NodeExecutionType` | Execution plane fork | `enum: ["in_process", "container"]` |
+| `WorkloadClassification` | Credential access control | `enum: ["action", "agentic"]` |
+| `StandardOutputWrapper` | Immutable output contract | `{Result, StatusCode, StatusMessage, ErrorMessage}` |
+| `CredentialReference` | UUID-based credential reference | `{credential_id, credential_mount_type, credential_mount_path}` |
+| `ResourceRequirements` | Kubernetes resource limits | `{limits: {cpu, memory}, requests: {cpu, memory}}` |
+| `SchedulingControls` | Egress allowlist + affinity | `{connectivity_requirements, affinity_labels}` |
+| `DependencyDeclaration` | Version + capability constraints | `{platformVersion, capabilities, collections, extensions}` |
 
----
+### Compiled Definition Shape
 
-**Last Updated:** 2026-09-08  
-**Schema Version:** 1.0.0  
-**Platform Compatibility:** Syntara >=3.0.0
+Every compiled `node-definition.json` declares, at minimum:
+
+```json
+{
+  "nodeType": "script_executor",
+  "category": "task",
+  "execution_type": "container",
+  "inputs": { "...": "typed properties" },
+  "outputs": { "$ref": "common-definitions.json#/definitions/StandardOutputWrapper" }
+}
+```
+
+`nodeType`, `category`, `execution_type`, `inputs`, and `outputs` are required on all compiled node definitions. The `category` and `execution_type` pairing determines node behavior:
+- **`script_executor`** manifest declares `category: task` + `execution_type: container`
+- **`http_request`** manifest declares `category: action` + `execution_type: container`  
+- **`subworkflow_trigger`** manifest declares `category: trigger` + `execution_type: in_process`
+
+These pairings are validated during `ao-sdk validate` and enforced by the registry's table constraints.

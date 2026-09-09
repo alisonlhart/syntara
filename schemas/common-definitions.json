@@ -237,17 +237,25 @@
     "NodeCategory": {
       "type": "string",
       "title": "Node Category",
-      "description": "Platform-wide node taxonomy classification. Categorizes nodes by their execution model and architectural role. Used for UI organization, routing decisions, and capability validation.",
-      "enum": ["action", "workflow", "task", "trigger"],
-      "examples": ["action", "workflow", "task", "trigger"]
+      "description": "Platform-wide node taxonomy classification. Categorizes nodes by their architectural role. Exactly four categories exist: 'action' (domain and API integrations), 'task' (atomic compute and script executors), 'workflow' (in-memory control-plane logic), and 'trigger' (event entry points, including the dedicated subworkflow_trigger). Used for UI organization, routing decisions, and capability validation.",
+      "enum": ["action", "task", "workflow", "trigger"],
+      "examples": ["action", "task", "workflow", "trigger"]
+    },
+
+    "NodeExecutionType": {
+      "type": "string",
+      "title": "Node Execution Type",
+      "description": "Determines where and how the platform dispatches the node. 'in_process': executed inline as built-in Temporal activities within the orchestrator process — used for control-plane 'workflow' logic and 'trigger' nodes (including subworkflow_trigger) that require no isolated runtime. 'container': dispatched to an isolated worker pod (the 1803 execution plane) — used for 'action' and 'task' nodes that run user or integration code under strict resource and network isolation. The dynamic dispatch logic in dynamic_workflow.py forks on this value.",
+      "enum": ["in_process", "container"],
+      "examples": ["in_process", "container"]
     },
 
     "WorkloadClassification": {
       "type": "string",
       "title": "Workload Classification",
-      "description": "Security classification determining the types of credentials the node may access. 'deterministic' nodes (scripted, predictable execution) can use infrastructure credentials (SSH, API keys). 'agentic' nodes (LLM-driven, non-deterministic) are blocked from infrastructure credentials to prevent prompt injection attacks from escalating to infrastructure compromise.",
-      "enum": ["deterministic", "agentic"],
-      "default": "deterministic"
+      "description": "Security classification determining the types of credentials the node may access. 'action' nodes (scripted, predictable execution) can use infrastructure credentials (SSH, API keys). 'agentic' nodes (LLM-driven, non-deterministic) are blocked from infrastructure credentials to prevent prompt injection attacks from escalating to infrastructure compromise. Surfaced for static administrative permission inspection and security auditing before container execution.",
+      "enum": ["action", "agentic"],
+      "default": "action"
     },
 
     "CredentialReference": {

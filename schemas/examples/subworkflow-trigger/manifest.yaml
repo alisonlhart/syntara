@@ -1,0 +1,114 @@
+# Syntara Node SDK - Trigger Node Example
+# Category: trigger (event entry points)
+# Node Type: subworkflow_trigger (composable workflow invocation)
+
+# Node identification and taxonomy
+nodeType: subworkflow_trigger
+category: trigger  # Event entry point
+execution_type: in_process  # Runs as built-in Temporal activity
+
+# Node metadata for UI and discovery
+displayName: Sub-Workflow Trigger
+description: |
+  Invokes a child workflow as a reusable, composable unit. Passes parent context
+  and ingress payload, awaits terminal output, and returns result to parent workflow.
+  Platform tracks invocation depth to prevent unbounded recursion.
+version: 1.0.0
+author: Syntara Team
+license: MIT
+
+# Input schema - rendered as PatternFly form fields in React canvas
+inputs:
+  properties:
+    workflow_id:
+      type: string
+      format: uuid
+      description: UUID of the child workflow definition to invoke
+      examples:
+        - 550e8400-e29b-41d4-a716-446655440000
+
+    workflow_name:
+      type: string
+      description: Human-readable name for the child workflow invocation (for tracing)
+      minLength: 1
+      maxLength: 255
+      pattern: "^[a-zA-Z0-9_-]+$"
+      examples:
+        - process_order
+        - validate_user_input
+
+    ingress_payload:
+      type: object
+      description: Input data passed to child workflow (must conform to child's input schema)
+      additionalProperties: true
+      examples:
+        - order_id: "ORD-12345"
+          user_id: "USR-98765"
+          priority: high
+
+    parent_execution_id:
+      type: string
+      description: Parent workflow execution ID (for lineage tracking)
+      pattern: "^exec_[a-zA-Z0-9-]+$"
+      examples:
+        - exec_parent_20260909_abc123
+
+    max_depth:
+      type: integer
+      description: Maximum recursion depth (platform default is 10)
+      minimum: 1
+      maximum: 50
+      default: 10
+
+    timeout_seconds:
+      type: integer
+      description: Child workflow execution timeout (0 = no timeout)
+      minimum: 0
+      maximum: 86400  # 24 hours max
+      default: 3600   # 1 hour default
+
+    propagate_context:
+      type: boolean
+      description: Inherit parent workflow's execution context (credentials, tags)
+      default: true
+
+  required:
+    - workflow_id
+    - workflow_name
+    - ingress_payload
+
+# Output schema - references StandardOutputWrapper from common-definitions.json
+outputs:
+  $ref: "../common-definitions.json#/definitions/StandardOutputWrapper"
+  description: |
+    Child workflow terminal output in Result field:
+    {
+      "child_execution_id": "exec_child_20260909_xyz789",
+      "status": "COMPLETED",
+      "result": {...},  # Child workflow's final output
+      "elapsed_seconds": 42,
+      "invocation_depth": 2
+    }
+
+# Execution metadata
+metadata:
+  # In-process nodes have no workload classification (not containerized)
+  # No resource_requirements (runs in orchestrator process)
+  # No scheduling_controls (no pod to schedule)
+
+  # Maximum execution duration (child workflow timeout + overhead)
+  execution_timeout: 3660  # 1 hour + 1 minute buffer
+
+  # Platform version requirements
+  dependencies:
+    platformVersion: ">=3.0.0"
+    capabilities:
+      - workflow-composition  # Requires sub-workflow support
+
+  # No retry policy - parent workflow controls retry behavior
+
+  # User-defined tags
+  tags:
+    - workflow:composition
+    - execution:in_process
+    - category:trigger

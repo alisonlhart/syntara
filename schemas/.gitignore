@@ -1,0 +1,6 @@
+# Node SDK build artifacts
+# node-definition.json files are compiled from manifest.yaml
+# They should be regenerated via build-manifest.sh or ao-sdk build
+
+examples/*/node-definition.json
+**/node-definition.json

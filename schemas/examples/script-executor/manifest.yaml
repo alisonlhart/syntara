@@ -1,0 +1,158 @@
+# Syntara Node SDK - Task Node Example
+# Category: task (atomic compute and script executors)
+# Node Type: script_executor (Python 3.12 / Bash 5.2)
+
+# Node identification and taxonomy
+nodeType: script_executor
+category: task  # Atomic compute node
+execution_type: container  # Isolated worker pod execution
+
+# Node metadata for UI and discovery
+displayName: Python Script Executor
+description: |
+  Executes Python 3.12 or Bash 5.2 scripts in isolated, unprivileged containers.
+  Supports credential injection, network egress controls, and custom resource limits.
+version: 1.0.0
+author: Syntara Team
+license: MIT
+
+# Input schema - rendered as PatternFly form fields in React canvas
+inputs:
+  properties:
+    script:
+      type: string
+      description: Raw source code to execute. For Python, include a main() entry point.
+      minLength: 1
+      maxLength: 1048576  # 1MB max
+      examples:
+        - |
+          def main(name, count):
+              results = []
+              for i in range(count):
+                  results.append(f"Hello {name} #{i+1}")
+              return {"greetings": results}
+
+    language:
+      type: string
+      description: Target runtime interpreter
+      enum:
+        - python3  # Python 3.12
+        - bash     # Bash 5.2
+      default: python3
+
+    arguments:
+      # Supports both named (object) and positional (array) arguments
+      oneOf:
+        - type: object
+          description: Named arguments passed to Python function
+          additionalProperties: true
+          examples:
+            - name: Alice
+              count: 5
+        - type: array
+          description: Positional arguments for Bash scripts
+          items:
+            type: string
+
+    environment_variables:
+      type: object
+      description: Additional environment variables injected into execution context
+      patternProperties:
+        "^[a-zA-Z_][a-zA-Z0-9_]*$":  # Valid shell variable names
+          type: string
+      examples:
+        - LOG_LEVEL: INFO
+          DEBUG: "false"
+
+    working_directory:
+      type: string
+      description: Container working directory (absolute path)
+      pattern: "^/[a-zA-Z0-9/_.-]*$"
+      default: /workspace
+
+  required:
+    - script
+    - language
+
+# Credential injection (UUID-based, no raw secrets)
+secrets:
+  credential_id:
+    type: string
+    format: uuid
+    description: Platform-managed credential UUID (resolved at runtime)
+    examples:
+      - 550e8400-e29b-41d4-a716-446655440000
+
+  credential_mount_type:
+    type: string
+    enum:
+      - env   # Mount as environment variables (API keys, tokens)
+      - file  # Mount as tmpfs file (SSH keys, certificates)
+    default: env
+    description: |
+      How to inject credential into container:
+      - env: Available via os.environ['CREDENTIAL_KEY']
+      - file: Available at /run/secrets/credential (RAM-backed tmpfs)
+
+# Output schema - references StandardOutputWrapper from common-definitions.json
+outputs:
+  $ref: "../common-definitions.json#/definitions/StandardOutputWrapper"
+  description: |
+    Script execution results in Result field:
+    {
+      "stdout": "...",
+      "stderr": "...",
+      "return_value": {...},
+      "exit_code": 0
+    }
+
+# Execution metadata and scheduling controls
+metadata:
+  # Workload security classification
+  workload_classification: action  # Can access infrastructure credentials
+
+  # Kubernetes resource requirements
+  resource_requirements:
+    limits:
+      cpu: "1"        # 1 CPU core max
+      memory: 512Mi   # 512 MiB max (OOMKilled if exceeded)
+    requests:
+      cpu: 250m       # 0.25 CPU cores guaranteed
+      memory: 256Mi   # 256 MiB guaranteed
+
+  # Maximum execution duration
+  execution_timeout: 300  # 5 minutes (SIGKILL if exceeded)
+
+  # Pod placement and network controls
+  scheduling_controls:
+    # Target specific worker pools (optional)
+    affinity_labels:
+      - workload=compute  # Match nodes with this label
+
+    # Declared network egress requirements (enforced via NetworkPolicy)
+    connectivity_requirements:
+      - pypi.org           # Allow pip install
+      - api.github.com     # Allow GitHub API calls
+      # Undeclared endpoints will timeout
+
+  # Platform version and capability requirements
+  dependencies:
+    platformVersion: ">=3.0.0"
+    capabilities:
+      - script-execution  # Required for code execution
+      - network-egress    # Required for external connectivity
+
+  # Automatic retry on transient failures
+  retry_policy:
+    max_attempts: 2
+    initial_interval_seconds: 5
+    backoff_coefficient: 2.0
+    retryable_errors:
+      - ConnectionTimeout
+      - TemporaryFailure
+
+  # User-defined tags for organization
+  tags:
+    - data-processing
+    - automation
+    - python

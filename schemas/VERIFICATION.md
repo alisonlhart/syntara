@@ -1,6 +1,8 @@
 # Syntara Node SDK - Schema Verification Guide
 
-This guide walks through verifying that the JSON Schemas work correctly at each integration point: validation, frontend rendering, and backend scheduling.
+> **⚠️ Note:** This guide is being updated for the YAML authoring workflow. Current examples show JSON validation via `ajv-cli`. The SDK CLI (`ao-sdk validate`, `ao-sdk build`) will come in the future.
+
+This guide walks through verifying that schemas work correctly at each integration point: validation, frontend rendering, and backend scheduling.
 
 ---
 

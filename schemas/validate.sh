@@ -1,11 +1,14 @@
 #!/bin/bash
 # Syntara Node SDK - Schema Validation Script
 #
-# This script validates node definition examples against the official JSON Schemas
-# using ajv-cli (JSON Schema validator).
+# Validates COMPILED JSON node definitions against the official JSON Schemas.
+# For YAML manifest validation, use: ao-sdk validate manifest.yaml
+#
+# This script is primarily for testing the compiled JSON format that gets
+# stored in the registry after YAML manifests are built via ao-sdk build.
 #
 # Usage:
-#   ./validate.sh                    # Validate all examples
+#   ./validate.sh                    # Validate all JSON examples
 #   ./validate.sh script            # Validate only script examples
 #   ./validate.sh http              # Validate only HTTP examples
 #   ./validate.sh <example-file>    # Validate specific file

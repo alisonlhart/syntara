@@ -1,0 +1,193 @@
+# Syntara Node SDK - Action Node Example
+# Category: action (domain and API integrations)
+# Node Type: http_request (REST/GraphQL/Webhook orchestrator)
+
+# Node identification and taxonomy
+nodeType: http_request
+category: action  # API integration node
+execution_type: container  # Isolated worker pod execution
+
+# Node metadata for UI and discovery
+displayName: HTTP Request
+description: |
+  Non-blocking HTTP/HTTPS API orchestrator with credential injection, response parsing,
+  and automatic retry logic. Supports REST, GraphQL, and webhook integrations.
+version: 1.0.0
+author: Syntara Team
+license: MIT
+
+# Input schema - rendered as PatternFly form fields in React canvas
+inputs:
+  properties:
+    url:
+      type: string
+      description: Target HTTP/HTTPS URL (protocol required)
+      pattern: "^https?://[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(:[0-9]{1,5})?(/.*)?$"
+      minLength: 10
+      maxLength: 2048
+      examples:
+        - https://api.github.com/repos/owner/repo/issues
+        - https://httpbin.org/post
+        - http://internal-service.namespace.svc.cluster.local:8080/health
+
+    method:
+      type: string
+      description: HTTP method verb
+      enum:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+        - PATCH
+        - HEAD
+        - OPTIONS
+      default: GET
+
+    headers:
+      type: object
+      description: HTTP request headers (key-value pairs)
+      patternProperties:
+        "^[a-zA-Z0-9-]+$":  # Valid HTTP header names
+          type: string
+      examples:
+        - Content-Type: application/json
+          Accept: application/json
+          User-Agent: Syntara-Orchestrator/3.0
+
+    query_parameters:
+      type: object
+      description: URL query parameters (automatically URL-encoded)
+      patternProperties:
+        "^[a-zA-Z0-9_-]+$":
+          type: string
+      examples:
+        - page: "1"
+          per_page: "100"
+          status: active
+
+    body:
+      # Request payload - object for JSON, string for raw
+      oneOf:
+        - type: object
+          description: JSON object payload (auto-serialized)
+        - type: string
+          description: Raw string payload (XML, form data, etc.)
+      examples:
+        - title: New Issue
+          body: Created via Syntara workflow
+          labels:
+            - automation
+            - workflow
+
+    timeout_seconds:
+      type: integer
+      description: Request timeout (connection + read time)
+      minimum: 1
+      maximum: 600
+      default: 30
+
+    response_format:
+      type: string
+      description: How to parse response body
+      enum:
+        - json  # Parse as JSON object
+        - text  # Return raw string
+        - auto  # Detect from Content-Type header
+      default: auto
+
+    follow_redirects:
+      type: boolean
+      description: Automatically follow HTTP 3xx redirects (up to 10 hops)
+      default: true
+
+    verify_ssl:
+      type: boolean
+      description: Verify SSL/TLS certificates (disable only for dev/testing)
+      default: true
+
+  required:
+    - url
+    - method
+
+# Credential injection for authenticated API calls
+secrets:
+  credential_id:
+    type: string
+    format: uuid
+    description: Platform-managed credential UUID (e.g., API key, OAuth token)
+    examples:
+      - a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d
+
+  credential_mount_type:
+    type: string
+    enum:
+      - env   # Inject as Authorization header via env var
+      - file  # Client certificates mounted as tmpfs files
+    default: env
+
+# Output schema - references StandardOutputWrapper from common-definitions.json
+# During compilation, ao-sdk build resolves this to the canonical platform envelope
+outputs:
+  $ref: "../common-definitions.json#/definitions/StandardOutputWrapper"
+  description: |
+    HTTP response details in Result field:
+    {
+      "status_code": 200,
+      "headers": {"content-type": "application/json"},
+      "body": {...},
+      "elapsed_ms": 142,
+      "url": "https://api.example.com/resource"
+    }
+
+# Execution metadata and scheduling controls
+metadata:
+  # Workload security classification
+  workload_classification: action  # Can access API credentials
+
+  # Kubernetes resource requirements (I/O-bound, minimal CPU/memory)
+  resource_requirements:
+    limits:
+      cpu: 500m      # 0.5 CPU cores max
+      memory: 256Mi  # 256 MiB max
+    requests:
+      cpu: 100m      # 0.1 CPU cores guaranteed
+      memory: 128Mi  # 128 MiB guaranteed
+
+  # Maximum execution duration (including retries)
+  execution_timeout: 60  # 1 minute total
+
+  # Pod placement and network controls
+  scheduling_controls:
+    # No affinity labels needed (standard worker pool)
+    affinity_labels: []
+
+    # Network egress requirements
+    # Note: Scheduler auto-extracts hostname from 'url' input
+    # Explicitly declare additional endpoints only if needed
+    connectivity_requirements:
+      # Hostname from 'url' is automatically added
+      # Add extra endpoints here if script makes multi-hop requests
+
+  # Platform version and capability requirements
+  dependencies:
+    platformVersion: ">=3.0.0"
+    capabilities:
+      - network-egress  # Required for external HTTP requests
+
+  # Automatic retry on transient HTTP failures
+  retry_policy:
+    max_attempts: 3
+    initial_interval_seconds: 5
+    backoff_coefficient: 2.0  # Exponential backoff: 5s, 10s, 20s
+    retryable_status_codes:
+      - 429  # Rate limit
+      - 500  # Internal server error
+      - 502  # Bad gateway
+      - 503  # Service unavailable
+      - 504  # Gateway timeout
+
+  # User-defined tags for organization
+  tags:
+    - integration:rest-api
+    - network:external
+    - category:action

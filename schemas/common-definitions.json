@@ -1,0 +1,276 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://syntara.io/schemas/common-definitions.json",
+  "title": "Syntara Node SDK - Common Definitions",
+  "description": "Shared reusable definitions for Syntara Automation Orchestrator Node SDK. These components are referenced across all node types to ensure strict backwards compatibility and consistent runtime behavior.",
+
+  "definitions": {
+    "StandardOutputWrapper": {
+      "type": "object",
+      "title": "Standard Output Wrapper",
+      "description": "Mandatory, backwards-compatible output envelope for all task executions. This standardized structure enables workflow template expressions like ${fetch_data.Result.stdout} to remain stable across node versions. The backend scheduler and frontend canvas depend on this exact structure.",
+      "properties": {
+        "Result": {
+          "description": "Primary task return payload. Type varies by node implementation - may be an object (e.g., {stdout, stderr, exit_code}), string, array, or null. This is the data referenced in downstream workflow template expressions.",
+          "oneOf": [
+            { "type": "object" },
+            { "type": "string" },
+            { "type": "array" },
+            { "type": "null" }
+          ]
+        },
+        "StatusCode": {
+          "type": "integer",
+          "description": "Numeric execution status following POSIX exit code conventions. 0 indicates success. Non-zero values indicate failure states. The scheduler uses this to determine workflow branching and retry logic.",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 255
+        },
+        "StatusMessage": {
+          "type": "string",
+          "description": "Human-readable execution summary displayed in the UI execution history timeline. Should be concise (recommended max 200 characters) and describe what the task accomplished or attempted.",
+          "default": "",
+          "maxLength": 500
+        },
+        "ErrorMessage": {
+          "type": "string",
+          "description": "Detailed error diagnostics populated only on failure (StatusCode > 0). Should include stack traces, validation errors, or API error responses to aid debugging. Scrubbed of credentials before persistence.",
+          "default": "",
+          "maxLength": 10000
+        }
+      },
+      "required": ["Result", "StatusCode", "StatusMessage", "ErrorMessage"],
+      "additionalProperties": false
+    },
+
+    "DependencyDeclaration": {
+      "type": "object",
+      "title": "Dependency Declaration",
+      "description": "Declarative version constraints and capability requirements for node execution. The platform validates these at workflow deployment time (not runtime) to prevent dependency hell and version conflicts. Failure to satisfy dependencies blocks workflow execution.",
+      "properties": {
+        "platformVersion": {
+          "type": "string",
+          "description": "SemVer-compatible version range specifying the minimum required Syntara platform engine version. Examples: '>=3.0.0', '^3.1.0', '3.x'. The scheduler rejects nodes requiring newer platform capabilities than the deployed version.",
+          "pattern": "^(>=|\\^|~|\\*)?\\d+(\\.\\d+)?(\\.\\d+)?(-[a-zA-Z0-9.-]+)?(\\s*\\|\\|\\s*(>=|\\^|~|\\*)?\\d+(\\.\\d+)?(\\.\\d+)?(-[a-zA-Z0-9.-]+)?)*$",
+          "examples": [">=3.0.0", "^3.1.0", "3.x", ">=3.0.0 || >=4.0.0"]
+        },
+        "capabilities": {
+          "type": "array",
+          "description": "Standardized security clearance tags mapped to OpenShift Security Context Constraints and NetworkPolicies. The scheduler validates these against the cluster's security policy. Failure to declare required capabilities results in runtime permission denials.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "network-egress",
+              "network-ingress",
+              "script-execution",
+              "file-write",
+              "privileged-ports",
+              "host-network",
+              "kernel-modules"
+            ]
+          },
+          "uniqueItems": true,
+          "default": []
+        },
+        "collections": {
+          "type": "array",
+          "description": "Version-bounded Ansible collection dependencies required for execution. The platform pre-installs these into the worker container image during provisioning. Conflicts between collections across nodes are isolated via separate container images.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Fully-qualified Ansible Galaxy collection name in namespace.collection format.",
+                "pattern": "^[a-z0-9_]+\\.[a-z0-9_]+$",
+                "examples": ["community.general", "ansible.posix", "community.crypto"]
+              },
+              "version": {
+                "type": "string",
+                "description": "SemVer version constraint for the collection.",
+                "pattern": "^(>=|\\^|~|\\*)?\\d+(\\.\\d+)?(\\.\\d+)?(-[a-zA-Z0-9.-]+)?$",
+                "examples": [">=8.0.0", "^8.5.0"]
+              }
+            },
+            "required": ["name", "version"],
+            "additionalProperties": false
+          },
+          "default": []
+        },
+        "extensions": {
+          "type": "array",
+          "description": "Required peer extension dependencies (other Community Node Packages). The platform validates these are installed and version-compatible before allowing workflow deployment. Used when one node builds on another's functionality.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Package name of the required extension, following npm scoping conventions for Community Nodes.",
+                "pattern": "^(@[a-z0-9-]+/)?[a-z0-9-]+$",
+                "examples": ["@syntara-community/base-credential-resolver", "ssh-connector"]
+              },
+              "version": {
+                "type": "string",
+                "description": "SemVer version constraint for the extension.",
+                "pattern": "^(>=|\\^|~|\\*)?\\d+(\\.\\d+)?(\\.\\d+)?(-[a-zA-Z0-9.-]+)?$",
+                "examples": [">=1.2.0", "^1.0.0"]
+              }
+            },
+            "required": ["name", "version"],
+            "additionalProperties": false
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ResourceRequirements": {
+      "type": "object",
+      "title": "Resource Requirements",
+      "description": "CPU and memory allocation boundaries mapped directly to Kubernetes ResourceRequirements. These constraints prevent runaway tasks from starving cluster resources and enable accurate cost accounting. The OpenShift scheduler uses these to place pods on appropriately-sized worker nodes.",
+      "properties": {
+        "limits": {
+          "type": "object",
+          "description": "Maximum resource ceiling. The container is throttled (CPU) or OOMKilled (memory) if it exceeds these values. Setting limits too low causes task failures; too high wastes cluster capacity.",
+          "properties": {
+            "cpu": {
+              "type": "string",
+              "description": "CPU limit in Kubernetes quantity format. Integer values = cores (e.g., '2' = 2 cores). Decimal/suffix = millicores (e.g., '500m' = 0.5 cores). Typical range: 100m-4.",
+              "pattern": "^\\d+(\\.\\d+)?m?$",
+              "default": "1",
+              "examples": ["100m", "0.5", "1", "2", "4"]
+            },
+            "memory": {
+              "type": "string",
+              "description": "Memory limit in Kubernetes quantity format. Supports Ki, Mi, Gi suffixes (binary, base-1024). Task is OOMKilled if it exceeds this. Typical range: 128Mi-8Gi.",
+              "pattern": "^\\d+(Ki|Mi|Gi)?$",
+              "default": "512Mi",
+              "examples": ["128Mi", "256Mi", "512Mi", "1Gi", "2Gi"]
+            }
+          },
+          "required": ["cpu", "memory"],
+          "additionalProperties": false
+        },
+        "requests": {
+          "type": "object",
+          "description": "Minimum guaranteed resource reservation. The scheduler only places the pod on nodes with this much available capacity. Setting requests = limits ensures predictable QoS (Guaranteed class). Setting requests < limits enables overcommitment (Burstable class).",
+          "properties": {
+            "cpu": {
+              "type": "string",
+              "description": "CPU request in Kubernetes quantity format. Should typically match limits for compute-intensive tasks to avoid throttling.",
+              "pattern": "^\\d+(\\.\\d+)?m?$",
+              "default": "100m",
+              "examples": ["100m", "0.5", "1", "2"]
+            },
+            "memory": {
+              "type": "string",
+              "description": "Memory request in Kubernetes quantity format. Should typically be 80-100% of limits to prevent OOMKills while allowing some burst capacity.",
+              "pattern": "^\\d+(Ki|Mi|Gi)?$",
+              "default": "256Mi",
+              "examples": ["128Mi", "256Mi", "512Mi", "1Gi"]
+            }
+          },
+          "required": ["cpu", "memory"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["limits", "requests"],
+      "additionalProperties": false
+    },
+
+    "ExecutionTimeout": {
+      "type": "integer",
+      "title": "Execution Timeout",
+      "description": "Maximum task execution duration in seconds. The scheduler forcibly terminates (SIGKILL) the container if execution exceeds this threshold. Prevents hung tasks from blocking workflow completion. Minimum 1 second, maximum 24 hours (86400 seconds).",
+      "minimum": 1,
+      "maximum": 86400,
+      "default": 300,
+      "examples": [60, 300, 600, 1800, 3600]
+    },
+
+    "SchedulingControls": {
+      "type": "object",
+      "title": "Scheduling Controls",
+      "description": "Advanced pod placement and network connectivity directives. These controls enable tasks to target specific worker pools (e.g., GPU nodes, high-memory nodes) and declare required external endpoints for dynamic NetworkPolicy compilation.",
+      "properties": {
+        "affinity_labels": {
+          "type": "array",
+          "description": "Node affinity selectors for targeting specific OpenShift worker pools. Each label is a key=value pair (or key-only) that must match node labels. Example use cases: 'gpu=true' for ML workloads, 'zone=us-east-1a' for region pinning, 'workload=high-memory' for resource-intensive tasks.",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)?(=[a-zA-Z0-9._-]+)?$",
+            "examples": ["gpu=true", "zone=us-east-1a", "workload=high-memory", "node.kubernetes.io/instance-type=m5.2xlarge"]
+          },
+          "default": []
+        },
+        "connectivity_requirements": {
+          "type": "array",
+          "description": "External hostnames, FQDNs, or IP addresses that the task requires network egress to. The scheduler dynamically compiles OpenShift NetworkPolicies allowing TCP egress strictly to these endpoints. Supports DNS names (resolved at policy compile time) and CIDR blocks. Failure to declare required endpoints causes connection timeouts.",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "hostname",
+                "description": "DNS hostname or FQDN",
+                "examples": ["api.github.com", "registry.npmjs.org", "pypi.org"]
+              },
+              {
+                "type": "string",
+                "format": "ipv4",
+                "description": "IPv4 address",
+                "examples": ["10.0.0.1", "192.168.1.100"]
+              },
+              {
+                "type": "string",
+                "pattern": "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}/\\d{1,2}$",
+                "description": "IPv4 CIDR block",
+                "examples": ["10.0.0.0/8", "192.168.1.0/24"]
+              }
+            ]
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "WorkloadClassification": {
+      "type": "string",
+      "title": "Workload Classification",
+      "description": "Security classification determining the types of credentials the node may access. 'action' nodes (deterministic, scripted) can use infrastructure credentials (SSH, API keys). 'agentic' nodes (LLM-driven, non-deterministic) are blocked from infrastructure credentials to prevent prompt injection attacks from escalating to infrastructure compromise.",
+      "enum": ["action", "agentic"],
+      "default": "action"
+    },
+
+    "CredentialReference": {
+      "type": "object",
+      "title": "Credential Reference",
+      "description": "Declarative reference to a platform-managed credential. The node never receives raw secrets. Instead, the scheduler resolves the credential_id at runtime, decrypts the vault entry, and injects it via the specified mount type. This prevents credential leakage in workflow definitions and audit logs.",
+      "properties": {
+        "credential_id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "UUID of the credential stored in the platform's encrypted vault. Validated at workflow deployment time to ensure the credential exists and is accessible to the workflow owner.",
+          "examples": ["550e8400-e29b-41d4-a716-446655440000"]
+        },
+        "credential_mount_type": {
+          "type": "string",
+          "description": "How the resolved credential should be injected into the container. 'env': Mounted as environment variables (suitable for API keys, tokens). 'file': Written to a RAM-backed tmpfs mount (suitable for SSH keys, certificates, kubeconfigs). File mounts are deleted on container exit.",
+          "enum": ["env", "file"],
+          "default": "env"
+        },
+        "credential_mount_path": {
+          "type": "string",
+          "description": "Target path for 'file' mount type. Must be an absolute path. The scheduler creates a tmpfs volume at this location and writes the credential file(s). Only applicable when credential_mount_type='file'. Ignored for 'env' mounts.",
+          "pattern": "^/[a-zA-Z0-9/_.-]+$",
+          "examples": ["/tmp/credentials", "/run/secrets/ssh-key"]
+        }
+      },
+      "required": ["credential_id"],
+      "additionalProperties": false,
+      "dependencies": {
+        "credential_mount_path": ["credential_mount_type"]
+      }
+    }
+  }
+}

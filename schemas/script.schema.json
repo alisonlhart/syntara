@@ -1,0 +1,235 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://syntara.io/schemas/script.schema.json",
+  "title": "Syntara Script Executor Node",
+  "description": "Containerized Python 3.12 and Bash 5.2 script execution node. Runs untrusted user code in unprivileged, daemonless OCI containers with strict resource limits and network isolation. Payloads reach the sandbox via Exec-Based Streaming (stdin JSON → stdout results). This is the foundational building block for custom automation logic.",
+
+  "type": "object",
+  "properties": {
+    "nodeType": {
+      "type": "string",
+      "const": "script_executor",
+      "description": "Static node type identifier used by the platform to route execution to the correct worker container image."
+    },
+
+    "inputs": {
+      "type": "object",
+      "description": "Script execution parameters. These are serialized as JSON and streamed to the container's stdin. The worker process deserializes them and passes to the script runtime.",
+      "properties": {
+        "script": {
+          "type": "string",
+          "description": "Raw source code to execute. For Python: should contain a callable entry point (e.g., 'def main():'). For Bash: executed as a shell script. Maximum size 1MB to prevent container memory exhaustion.",
+          "minLength": 1,
+          "maxLength": 1048576
+        },
+        "language": {
+          "type": "string",
+          "description": "Target runtime interpreter. 'python3': Executes via Python 3.12 with standard library + pip-installed packages declared in dependencies. 'bash': Executes via Bash 5.2 with coreutils.",
+          "enum": ["python3", "bash"]
+        },
+        "arguments": {
+          "description": "Runtime arguments passed to the script. For Python: mapped to function parameters (e.g., {name: 'Alice'} → main(name='Alice')). For Bash: available as environment variables or $1, $2 positional args. Type flexibility allows both named (object) and positional (array) argument passing.",
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "Named arguments (key-value pairs) for Python functions or Bash environment variables.",
+              "additionalProperties": true
+            },
+            {
+              "type": "array",
+              "description": "Positional arguments for Bash scripts ($1, $2, etc.).",
+              "items": {
+                "oneOf": [
+                  { "type": "string" },
+                  { "type": "number" },
+                  { "type": "boolean" },
+                  { "type": "object" },
+                  { "type": "array" }
+                ]
+              }
+            }
+          ]
+        },
+        "working_directory": {
+          "type": "string",
+          "description": "Container working directory path where the script executes. Must be an absolute path. The scheduler creates this directory (and parents) if missing. Defaults to /workspace (a RAM-backed tmpfs mount).",
+          "pattern": "^/[a-zA-Z0-9/_.-]*$",
+          "default": "/workspace"
+        },
+        "environment_variables": {
+          "type": "object",
+          "description": "Additional environment variables injected into the script's execution context. Keys must be valid shell variable names (alphanumeric + underscore, cannot start with digit). Values are coerced to strings.",
+          "patternProperties": {
+            "^[a-zA-Z_][a-zA-Z0-9_]*$": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": ["script", "language"],
+      "additionalProperties": false
+    },
+
+    "secrets": {
+      "description": "Credential injection configuration. References a platform-managed credential by UUID and specifies how it should be mounted into the container. The scheduler resolves this at runtime and injects the decrypted secret via the specified mechanism.",
+      "$ref": "common-definitions.json#/definitions/CredentialReference"
+    },
+
+    "outputs": {
+      "description": "Standardized output envelope returned by all script executions. This structure enables stable template expressions in downstream workflow nodes (e.g., ${my_script.Result.stdout}).",
+      "$ref": "common-definitions.json#/definitions/StandardOutputWrapper"
+    },
+
+    "metadata": {
+      "type": "object",
+      "description": "Execution scheduling and resource control metadata. These settings govern pod placement, resource allocation, network policies, and timeout enforcement.",
+      "properties": {
+        "workload_classification": {
+          "$ref": "common-definitions.json#/definitions/WorkloadClassification"
+        },
+        "resource_requirements": {
+          "$ref": "common-definitions.json#/definitions/ResourceRequirements"
+        },
+        "execution_timeout": {
+          "$ref": "common-definitions.json#/definitions/ExecutionTimeout"
+        },
+        "scheduling_controls": {
+          "$ref": "common-definitions.json#/definitions/SchedulingControls"
+        },
+        "dependencies": {
+          "$ref": "common-definitions.json#/definitions/DependencyDeclaration"
+        },
+        "retry_policy": {
+          "type": "object",
+          "description": "Automatic retry behavior for transient failures. The scheduler retries tasks matching the specified error patterns with exponential backoff.",
+          "properties": {
+            "max_attempts": {
+              "type": "integer",
+              "description": "Maximum number of execution attempts (including the initial attempt). Must be >= 1. Setting to 1 disables retries.",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 1
+            },
+            "initial_interval_seconds": {
+              "type": "integer",
+              "description": "Initial delay in seconds before the first retry. Doubles on each subsequent retry (exponential backoff).",
+              "minimum": 1,
+              "maximum": 300,
+              "default": 5
+            },
+            "backoff_coefficient": {
+              "type": "number",
+              "description": "Multiplier applied to the retry interval after each attempt. 2.0 = exponential backoff (5s, 10s, 20s, ...). 1.0 = constant interval.",
+              "minimum": 1.0,
+              "maximum": 10.0,
+              "default": 2.0
+            },
+            "retryable_errors": {
+              "type": "array",
+              "description": "List of error patterns (regex) that trigger automatic retry. Examples: 'ConnectionTimeout', 'TemporaryFailure', '503 Service Unavailable'. Empty array = retry all non-zero exit codes.",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false
+        },
+        "tags": {
+          "type": "array",
+          "description": "User-defined metadata tags for organization, search, and cost allocation. These do not affect execution behavior. Tags are indexed for UI filtering and audit queries.",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9:._/-]{1,128}$"
+          },
+          "maxItems": 20,
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+
+  "required": ["nodeType", "inputs", "outputs"],
+  "additionalProperties": false,
+
+  "examples": [
+    {
+      "nodeType": "script_executor",
+      "inputs": {
+        "script": "def main(name: str, count: int):\n    return {'greeting': f'Hello {name}!', 'iterations': count}\n",
+        "language": "python3",
+        "arguments": {
+          "name": "Alice",
+          "count": 5
+        }
+      },
+      "secrets": {
+        "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        "credential_mount_type": "env"
+      },
+      "outputs": {
+        "Result": {
+          "greeting": "Hello Alice!",
+          "iterations": 5
+        },
+        "StatusCode": 0,
+        "StatusMessage": "Script executed successfully",
+        "ErrorMessage": ""
+      },
+      "metadata": {
+        "workload_classification": "action",
+        "resource_requirements": {
+          "limits": {
+            "cpu": "1",
+            "memory": "512Mi"
+          },
+          "requests": {
+            "cpu": "100m",
+            "memory": "256Mi"
+          }
+        },
+        "execution_timeout": 300,
+        "scheduling_controls": {
+          "connectivity_requirements": ["pypi.org", "api.github.com"]
+        },
+        "dependencies": {
+          "platformVersion": ">=3.0.0",
+          "capabilities": ["script-execution", "network-egress"]
+        }
+      }
+    },
+    {
+      "nodeType": "script_executor",
+      "inputs": {
+        "script": "#!/bin/bash\necho \"Processing file: $1\"\ngrep -i \"error\" \"$1\" | wc -l\n",
+        "language": "bash",
+        "arguments": ["/workspace/logs/app.log"]
+      },
+      "outputs": {
+        "Result": {
+          "stdout": "42\n",
+          "stderr": "",
+          "exit_code": 0
+        },
+        "StatusCode": 0,
+        "StatusMessage": "Log analysis completed",
+        "ErrorMessage": ""
+      },
+      "metadata": {
+        "execution_timeout": 60,
+        "resource_requirements": {
+          "limits": {
+            "cpu": "500m",
+            "memory": "256Mi"
+          },
+          "requests": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          }
+        }
+      }
+    }
+  ]
+}

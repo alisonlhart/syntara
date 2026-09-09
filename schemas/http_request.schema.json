@@ -1,0 +1,386 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://syntara.io/schemas/http_request.schema.json",
+  "title": "Syntara HTTP Request Node",
+  "description": "Non-blocking external API orchestrator node. Executes HTTP/HTTPS requests with credential injection, response parsing, and automatic retry logic. The scheduler compiles OpenShift NetworkPolicies allowing egress strictly to the declared URL before container startup. Supports REST, GraphQL, and webhook integrations.",
+
+  "type": "object",
+  "properties": {
+    "nodeType": {
+      "type": "string",
+      "const": "http_request",
+      "description": "Static node type identifier used by the platform to route execution to the correct worker container image."
+    },
+
+    "inputs": {
+      "type": "object",
+      "description": "HTTP request configuration. These parameters are serialized as JSON and passed to the containerized HTTP client worker. The worker validates the URL, resolves credentials, compiles headers, and executes the request.",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Target HTTP/HTTPS URL. Must include protocol scheme (http:// or https://). The hostname is extracted and added to the pod's NetworkPolicy egress allowlist. Supports template expressions for dynamic URLs (e.g., 'https://api.example.com/users/${user_id}').",
+          "pattern": "^https?://[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(:[0-9]{1,5})?(/.*)?$",
+          "minLength": 10,
+          "maxLength": 2048,
+          "examples": [
+            "https://api.github.com/repos/owner/repo",
+            "https://httpbin.org/post",
+            "http://internal-service.namespace.svc.cluster.local:8080/health"
+          ]
+        },
+        "method": {
+          "type": "string",
+          "description": "HTTP method verb. Determines the semantic operation and whether a request body is allowed. GET/HEAD/DELETE typically have no body. POST/PUT/PATCH require a body for most REST APIs.",
+          "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+          "default": "GET"
+        },
+        "headers": {
+          "type": "object",
+          "description": "HTTP headers to include in the request. Keys are header names (case-insensitive per HTTP spec). Values are header values. Common use cases: 'Content-Type': 'application/json', 'Authorization': 'Bearer ${token}', 'User-Agent': 'Syntara/3.0'. Credential-based auth headers (Authorization, X-API-Key) should use template expressions referencing the 'secrets' configuration instead of hardcoding tokens.",
+          "patternProperties": {
+            "^[a-zA-Z0-9-]+$": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "examples": [
+            {
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+              "User-Agent": "Syntara-Orchestrator/3.0"
+            }
+          ]
+        },
+        "query_parameters": {
+          "type": "object",
+          "description": "URL query parameters to append to the request URL. Keys are parameter names. Values are parameter values (automatically URL-encoded). Example: {page: '2', limit: '50'} → '?page=2&limit=50'. For array parameters, use comma-separated strings or leverage template expressions.",
+          "patternProperties": {
+            "^[a-zA-Z0-9_-]+$": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "examples": [
+            {
+              "page": "1",
+              "per_page": "100",
+              "status": "active"
+            }
+          ]
+        },
+        "body": {
+          "description": "HTTP request body payload. For JSON APIs, pass an object (automatically serialized to JSON with Content-Type: application/json). For form data or raw payloads, pass a string. The 'Content-Type' header should match the body format. Not allowed for GET, HEAD, DELETE methods (validation error if provided).",
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "JSON object payload (most common for REST APIs). Automatically serialized with JSON.stringify()."
+            },
+            {
+              "type": "string",
+              "description": "Raw string payload for XML, form data, plain text, or pre-serialized JSON."
+            }
+          ],
+          "examples": [
+            {
+              "name": "New Resource",
+              "description": "Created via Syntara workflow",
+              "enabled": true
+            },
+            "<?xml version=\"1.0\"?><request><action>create</action></request>",
+            "key1=value1&key2=value2"
+          ]
+        },
+        "follow_redirects": {
+          "type": "boolean",
+          "description": "Whether to automatically follow HTTP 3xx redirects. When true, the client follows redirects up to a maximum of 10 hops. When false, 3xx responses are returned as-is with status_code in the 300-399 range. Useful for detecting redirect loops or capturing intermediate redirect URLs.",
+          "default": true
+        },
+        "verify_ssl": {
+          "type": "boolean",
+          "description": "Whether to verify SSL/TLS certificates for HTTPS requests. Should be true for production. Setting to false disables certificate validation, allowing self-signed certs or expired certificates. Only disable for development/testing against known internal services. Security warning logged when false.",
+          "default": true
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "description": "Maximum time in seconds to wait for the HTTP response (connection + read time). If the server does not respond within this duration, the request is cancelled and StatusCode is set to a timeout error code. Should be less than the overall execution_timeout in metadata.",
+          "minimum": 1,
+          "maximum": 600,
+          "default": 30
+        },
+        "response_format": {
+          "type": "string",
+          "description": "How to parse the HTTP response body. 'json': Parse as JSON object (error if invalid JSON). 'text': Return raw response as string. 'auto': Detect based on Content-Type header (application/json → json, else text).",
+          "enum": ["json", "text", "auto"],
+          "default": "auto"
+        }
+      },
+      "required": ["url", "method"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "enum": ["GET", "HEAD", "DELETE"]
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": ["body"]
+            }
+          }
+        }
+      ]
+    },
+
+    "secrets": {
+      "description": "Optional credential injection configuration. When provided, the scheduler resolves the credential at runtime and makes it available to the HTTP client for authentication. Common use cases: API keys mounted as environment variables, client certificates mounted as files.",
+      "$ref": "common-definitions.json#/definitions/CredentialReference"
+    },
+
+    "outputs": {
+      "description": "Standardized output envelope returned by all HTTP request executions. The Result object contains the response payload, status code, and headers. StatusCode (the outer field) indicates task success (0) vs network/timeout failures (non-zero). The response HTTP status is in Result.status_code.",
+      "allOf": [
+        {
+          "$ref": "common-definitions.json#/definitions/StandardOutputWrapper"
+        },
+        {
+          "properties": {
+            "Result": {
+              "type": "object",
+              "description": "HTTP response details. This object structure is guaranteed stable for template expressions.",
+              "properties": {
+                "status_code": {
+                  "type": "integer",
+                  "description": "HTTP status code returned by the server (e.g., 200, 404, 500). Follows RFC 7231 semantics. Not to be confused with the outer StatusCode field (which indicates task execution success/failure).",
+                  "minimum": 100,
+                  "maximum": 599,
+                  "examples": [200, 201, 400, 404, 500, 503]
+                },
+                "headers": {
+                  "type": "object",
+                  "description": "HTTP response headers returned by the server. Keys are header names (lowercased for consistency). Values are header values. Useful for extracting pagination tokens, rate limit info, or correlation IDs.",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "body": {
+                  "description": "Parsed response body. Type depends on response_format: 'json' → object/array, 'text' → string. Null if response has no body (e.g., 204 No Content).",
+                  "oneOf": [
+                    { "type": "object" },
+                    { "type": "array" },
+                    { "type": "string" },
+                    { "type": "null" }
+                  ]
+                },
+                "elapsed_ms": {
+                  "type": "integer",
+                  "description": "Total request duration in milliseconds, including DNS resolution, connection establishment, TLS handshake, and response read time. Useful for performance monitoring and SLA validation.",
+                  "minimum": 0
+                },
+                "url": {
+                  "type": "string",
+                  "description": "Final URL after redirects (if follow_redirects=true). Matches the input URL if no redirects occurred."
+                }
+              },
+              "required": ["status_code", "headers", "body", "elapsed_ms", "url"]
+            }
+          }
+        }
+      ]
+    },
+
+    "metadata": {
+      "type": "object",
+      "description": "Execution scheduling and resource control metadata. These settings govern pod placement, resource allocation, network policies, and timeout enforcement.",
+      "properties": {
+        "workload_classification": {
+          "$ref": "common-definitions.json#/definitions/WorkloadClassification"
+        },
+        "resource_requirements": {
+          "description": "HTTP request nodes typically require minimal CPU/memory since they are I/O-bound. Defaults are optimized for typical API calls. Increase if handling large response payloads (>10MB) or high concurrency.",
+          "$ref": "common-definitions.json#/definitions/ResourceRequirements"
+        },
+        "execution_timeout": {
+          "description": "Maximum total execution time including retries. Should be greater than (inputs.timeout_seconds * retry_policy.max_attempts * retry_policy.backoff_coefficient) to allow all retries to complete.",
+          "$ref": "common-definitions.json#/definitions/ExecutionTimeout"
+        },
+        "scheduling_controls": {
+          "description": "The scheduler automatically extracts the hostname from inputs.url and adds it to connectivity_requirements. Explicitly declaring additional endpoints here is only needed for multi-hop request chains or DNS aliases.",
+          "$ref": "common-definitions.json#/definitions/SchedulingControls"
+        },
+        "dependencies": {
+          "$ref": "common-definitions.json#/definitions/DependencyDeclaration"
+        },
+        "retry_policy": {
+          "type": "object",
+          "description": "Automatic retry behavior for transient HTTP failures. The scheduler retries requests matching the specified status code patterns with exponential backoff. Common patterns: retry on 5xx server errors, 429 rate limits, network timeouts.",
+          "properties": {
+            "max_attempts": {
+              "type": "integer",
+              "description": "Maximum number of HTTP request attempts (including the initial attempt). Must be >= 1. Setting to 1 disables retries.",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 3
+            },
+            "initial_interval_seconds": {
+              "type": "integer",
+              "description": "Initial delay in seconds before the first retry. Doubles on each subsequent retry (exponential backoff). Should respect the API's Retry-After header if present.",
+              "minimum": 1,
+              "maximum": 300,
+              "default": 5
+            },
+            "backoff_coefficient": {
+              "type": "number",
+              "description": "Multiplier applied to the retry interval after each attempt. 2.0 = exponential backoff (5s, 10s, 20s, ...). 1.0 = constant interval.",
+              "minimum": 1.0,
+              "maximum": 10.0,
+              "default": 2.0
+            },
+            "retryable_status_codes": {
+              "type": "array",
+              "description": "HTTP status codes that should trigger automatic retry. Common values: 429 (rate limit), 500 (internal server error), 502 (bad gateway), 503 (service unavailable), 504 (gateway timeout). 4xx client errors (except 429) typically should not retry as they indicate invalid requests.",
+              "items": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 599
+              },
+              "uniqueItems": true,
+              "default": [429, 500, 502, 503, 504],
+              "examples": [
+                [429, 500, 502, 503, 504],
+                [503, 504]
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "tags": {
+          "type": "array",
+          "description": "User-defined metadata tags for organization, search, and cost allocation. These do not affect execution behavior. Tags are indexed for UI filtering and audit queries. Common patterns: 'integration:github', 'environment:production', 'cost-center:eng'.",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9:._/-]{1,128}$"
+          },
+          "maxItems": 20,
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+
+  "required": ["nodeType", "inputs", "outputs"],
+  "additionalProperties": false,
+
+  "examples": [
+    {
+      "nodeType": "http_request",
+      "inputs": {
+        "url": "https://api.github.com/repos/syntara/orchestrator/issues",
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json",
+          "Accept": "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28"
+        },
+        "body": {
+          "title": "Automated issue from workflow",
+          "body": "This issue was created by Syntara workflow execution.",
+          "labels": ["automation", "workflow"]
+        },
+        "timeout_seconds": 30,
+        "response_format": "json"
+      },
+      "secrets": {
+        "credential_id": "a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d",
+        "credential_mount_type": "env"
+      },
+      "outputs": {
+        "Result": {
+          "status_code": 201,
+          "headers": {
+            "content-type": "application/json; charset=utf-8",
+            "x-ratelimit-remaining": "4999"
+          },
+          "body": {
+            "id": 123456,
+            "number": 42,
+            "state": "open",
+            "title": "Automated issue from workflow"
+          },
+          "elapsed_ms": 453,
+          "url": "https://api.github.com/repos/syntara/orchestrator/issues"
+        },
+        "StatusCode": 0,
+        "StatusMessage": "HTTP request completed successfully",
+        "ErrorMessage": ""
+      },
+      "metadata": {
+        "workload_classification": "action",
+        "resource_requirements": {
+          "limits": {
+            "cpu": "500m",
+            "memory": "256Mi"
+          },
+          "requests": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          }
+        },
+        "execution_timeout": 60,
+        "scheduling_controls": {
+          "connectivity_requirements": ["api.github.com"]
+        },
+        "dependencies": {
+          "platformVersion": ">=3.0.0",
+          "capabilities": ["network-egress"]
+        },
+        "retry_policy": {
+          "max_attempts": 3,
+          "initial_interval_seconds": 5,
+          "retryable_status_codes": [429, 502, 503, 504]
+        },
+        "tags": ["integration:github", "environment:production"]
+      }
+    },
+    {
+      "nodeType": "http_request",
+      "inputs": {
+        "url": "https://httpbin.org/get",
+        "method": "GET",
+        "query_parameters": {
+          "foo": "bar",
+          "page": "1"
+        },
+        "headers": {
+          "User-Agent": "Syntara-Test/1.0"
+        }
+      },
+      "outputs": {
+        "Result": {
+          "status_code": 200,
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "args": {
+              "foo": "bar",
+              "page": "1"
+            },
+            "headers": {
+              "User-Agent": "Syntara-Test/1.0"
+            },
+            "url": "https://httpbin.org/get?foo=bar&page=1"
+          },
+          "elapsed_ms": 234,
+          "url": "https://httpbin.org/get?foo=bar&page=1"
+        },
+        "StatusCode": 0,
+        "StatusMessage": "Request completed",
+        "ErrorMessage": ""
+      }
+    }
+  ]
+}

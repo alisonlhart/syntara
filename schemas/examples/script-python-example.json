@@ -1,0 +1,63 @@
+{
+  "$comment": "Example: Python script that fetches data from an API and processes it",
+  "nodeType": "script_executor",
+  "inputs": {
+    "script": "import json\nimport sys\n\ndef main(api_url: str, filter_status: str):\n    \"\"\"Fetch and filter API data.\"\"\"\n    # Simulated API response processing\n    mock_data = [\n        {\"id\": 1, \"status\": \"active\", \"name\": \"Resource A\"},\n        {\"id\": 2, \"status\": \"inactive\", \"name\": \"Resource B\"},\n        {\"id\": 3, \"status\": \"active\", \"name\": \"Resource C\"}\n    ]\n    \n    filtered = [item for item in mock_data if item[\"status\"] == filter_status]\n    \n    return {\n        \"total_count\": len(mock_data),\n        \"filtered_count\": len(filtered),\n        \"results\": filtered\n    }\n\nif __name__ == \"__main__\":\n    result = main(api_url=\"https://api.example.com/resources\", filter_status=\"active\")\n    print(json.dumps(result))\n",
+    "language": "python3",
+    "arguments": {
+      "api_url": "https://api.example.com/resources",
+      "filter_status": "active"
+    },
+    "environment_variables": {
+      "LOG_LEVEL": "INFO",
+      "ENVIRONMENT": "production"
+    },
+    "working_directory": "/workspace"
+  },
+  "secrets": {
+    "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+    "credential_mount_type": "env"
+  },
+  "outputs": {
+    "Result": {
+      "total_count": 3,
+      "filtered_count": 2,
+      "results": [
+        {"id": 1, "status": "active", "name": "Resource A"},
+        {"id": 3, "status": "active", "name": "Resource C"}
+      ]
+    },
+    "StatusCode": 0,
+    "StatusMessage": "Successfully processed 2 active resources out of 3 total",
+    "ErrorMessage": ""
+  },
+  "metadata": {
+    "workload_classification": "action",
+    "resource_requirements": {
+      "limits": {
+        "cpu": "1",
+        "memory": "512Mi"
+      },
+      "requests": {
+        "cpu": "250m",
+        "memory": "256Mi"
+      }
+    },
+    "execution_timeout": 300,
+    "scheduling_controls": {
+      "affinity_labels": ["workload=compute"],
+      "connectivity_requirements": ["api.example.com", "pypi.org"]
+    },
+    "dependencies": {
+      "platformVersion": ">=3.0.0",
+      "capabilities": ["script-execution", "network-egress"]
+    },
+    "retry_policy": {
+      "max_attempts": 2,
+      "initial_interval_seconds": 5,
+      "backoff_coefficient": 2.0,
+      "retryable_errors": ["ConnectionTimeout", "TemporaryFailure"]
+    },
+    "tags": ["data-processing", "api-integration", "production"]
+  }
+}

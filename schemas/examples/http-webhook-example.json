@@ -1,0 +1,69 @@
+{
+  "$comment": "Example: Simple GET request to public API (no authentication)",
+  "nodeType": "http_request",
+  "inputs": {
+    "url": "https://httpbin.org/get",
+    "method": "GET",
+    "query_parameters": {
+      "workflow_id": "wf_12345",
+      "execution_time": "2026-09-08T14:23:45Z",
+      "status": "success"
+    },
+    "headers": {
+      "User-Agent": "Syntara-Orchestrator/3.0",
+      "Accept": "application/json"
+    },
+    "timeout_seconds": 15,
+    "response_format": "auto"
+  },
+  "outputs": {
+    "Result": {
+      "status_code": 200,
+      "headers": {
+        "content-type": "application/json",
+        "content-length": "345",
+        "server": "gunicorn/19.9.0"
+      },
+      "body": {
+        "args": {
+          "workflow_id": "wf_12345",
+          "execution_time": "2026-09-08T14:23:45Z",
+          "status": "success"
+        },
+        "headers": {
+          "Accept": "application/json",
+          "Host": "httpbin.org",
+          "User-Agent": "Syntara-Orchestrator/3.0"
+        },
+        "origin": "203.0.113.45",
+        "url": "https://httpbin.org/get?workflow_id=wf_12345&execution_time=2026-09-08T14:23:45Z&status=success"
+      },
+      "elapsed_ms": 234,
+      "url": "https://httpbin.org/get?workflow_id=wf_12345&execution_time=2026-09-08T14%3A23%3A45Z&status=success"
+    },
+    "StatusCode": 0,
+    "StatusMessage": "HTTP GET request completed successfully",
+    "ErrorMessage": ""
+  },
+  "metadata": {
+    "execution_timeout": 30,
+    "resource_requirements": {
+      "limits": {
+        "cpu": "250m",
+        "memory": "128Mi"
+      },
+      "requests": {
+        "cpu": "50m",
+        "memory": "64Mi"
+      }
+    },
+    "scheduling_controls": {
+      "connectivity_requirements": ["httpbin.org"]
+    },
+    "dependencies": {
+      "platformVersion": ">=3.0.0",
+      "capabilities": ["network-egress"]
+    },
+    "tags": ["testing", "webhook"]
+  }
+}

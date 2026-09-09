@@ -1,0 +1,39 @@
+{
+  "$comment": "Example: Bash script for log analysis and metric extraction",
+  "nodeType": "script_executor",
+  "inputs": {
+    "script": "#!/bin/bash\nset -euo pipefail\n\n# Log analysis script\nLOG_FILE=\"$1\"\nERROR_THRESHOLD=\"$2\"\n\necho \"Analyzing log file: $LOG_FILE\"\n\n# Count error occurrences\nERROR_COUNT=$(grep -ci \"error\" \"$LOG_FILE\" || echo 0)\nWARNING_COUNT=$(grep -ci \"warning\" \"$LOG_FILE\" || echo 0)\nTOTAL_LINES=$(wc -l < \"$LOG_FILE\")\n\n# Generate JSON report\ncat <<EOF\n{\n  \"error_count\": $ERROR_COUNT,\n  \"warning_count\": $WARNING_COUNT,\n  \"total_lines\": $TOTAL_LINES,\n  \"threshold_exceeded\": $([ \"$ERROR_COUNT\" -gt \"$ERROR_THRESHOLD\" ] && echo \"true\" || echo \"false\")\n}\nEOF\n\nif [ \"$ERROR_COUNT\" -gt \"$ERROR_THRESHOLD\" ]; then\n  echo \"WARNING: Error count ($ERROR_COUNT) exceeds threshold ($ERROR_THRESHOLD)\" >&2\n  exit 1\nfi\n\nexit 0\n",
+    "language": "bash",
+    "arguments": ["/workspace/logs/application.log", "10"],
+    "working_directory": "/workspace"
+  },
+  "outputs": {
+    "Result": {
+      "stdout": "{\"error_count\": 7, \"warning_count\": 23, \"total_lines\": 1542, \"threshold_exceeded\": false}\n",
+      "stderr": "",
+      "exit_code": 0
+    },
+    "StatusCode": 0,
+    "StatusMessage": "Log analysis completed: 7 errors, 23 warnings found in 1542 lines",
+    "ErrorMessage": ""
+  },
+  "metadata": {
+    "workload_classification": "action",
+    "resource_requirements": {
+      "limits": {
+        "cpu": "500m",
+        "memory": "256Mi"
+      },
+      "requests": {
+        "cpu": "100m",
+        "memory": "128Mi"
+      }
+    },
+    "execution_timeout": 120,
+    "dependencies": {
+      "platformVersion": ">=3.0.0",
+      "capabilities": ["script-execution"]
+    },
+    "tags": ["log-analysis", "monitoring", "ops"]
+  }
+}

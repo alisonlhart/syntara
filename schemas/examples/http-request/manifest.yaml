@@ -9,6 +9,7 @@ execution_type: container  # Isolated worker pod execution
 
 # Node metadata for UI and discovery
 displayName: HTTP Request
+icon: globe  # React Flow palette glyph; see NodePaletteIcon in common-definitions.json
 description: |
   Non-blocking HTTP/HTTPS API orchestrator with credential injection, response parsing,
   and automatic retry logic. Supports REST, GraphQL, and webhook integrations.
@@ -105,39 +106,86 @@ inputs:
       description: Verify SSL/TLS certificates (disable only for dev/testing)
       default: true
 
+    # Typed array input — demonstrates that inputs support typed arrays
+    # alongside flat primitives (NodeInputs in common-definitions.json).
+    success_status_codes:
+      type: array
+      description: HTTP status codes treated as success (non-success sets StatusCode > 0)
+      items:
+        type: integer
+        minimum: 100
+        maximum: 599
+      uniqueItems: true
+      default:
+        - 200
+        - 201
+        - 204
+
+    # Dynamic nested object input — arbitrary caller-supplied key/value pairs.
+    # Demonstrates support for dynamic nested JSON objects.
+    context_vars:
+      type: object
+      description: Arbitrary caller-supplied variables merged into templated fields
+      additionalProperties:
+        oneOf:
+          - type: string
+          - type: number
+          - type: boolean
+      examples:
+        - environment: production
+          region: us-east-1
+          retries_enabled: true
+
   required:
     - url
     - method
 
-# Credential injection for authenticated API calls
-secrets:
-  credential_id:
-    type: string
-    format: uuid
-    description: Platform-managed credential UUID (e.g., API key, OAuth token)
-    examples:
-      - a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d
+# Credential injection for authenticated API calls.
+# Zero-trust: the manifest stores only abstract UUID references (credential_id).
+# The execution plane resolves each credential at runtime and injects it via the
+# requested mount type — env var, RAM-backed tmpfs_file, or HTTP header — before
+# the container starts. A node may declare multiple simultaneous references here
+# (each a CredentialReference); the shape is defined once, canonically, in
+# common-definitions.json.
+credential_references:
+  - $ref: "../common-definitions.json#/definitions/CredentialReference"
 
-  credential_mount_type:
-    type: string
-    enum:
-      - env   # Inject as Authorization header via env var
-      - file  # Client certificates mounted as tmpfs files
-    default: env
-
-# Output schema - references StandardOutputWrapper from common-definitions.json
-# During compilation, ao-sdk build resolves this to the canonical platform envelope
+# Output schema - references AND extends StandardOutputWrapper from
+# common-definitions.json. The outer envelope (Result/StatusCode/StatusMessage/
+# ErrorMessage) is inherited immutably via allOf; the inner Result object is
+# described here so the canvas can render downstream template autocompletion
+# (e.g. ${http_call.Result.body}, ${http_call.Result.status_code}).
 outputs:
-  $ref: "../common-definitions.json#/definitions/StandardOutputWrapper"
-  description: |
-    HTTP response details in Result field:
-    {
-      "status_code": 200,
-      "headers": {"content-type": "application/json"},
-      "body": {...},
-      "elapsed_ms": 142,
-      "url": "https://api.example.com/resource"
-    }
+  allOf:
+    - $ref: "../common-definitions.json#/definitions/StandardOutputWrapper"
+  properties:
+    Result:
+      type: object
+      description: HTTP response detail for a completed request. Null on transport failure.
+      properties:
+        status_code:
+          type: integer
+          description: HTTP response status code (e.g. 200, 404, 500).
+          minimum: 100
+          maximum: 599
+        headers:
+          type: object
+          description: Response headers as string key-value pairs.
+        body:
+          description: Parsed JSON body, or raw text when the response is not JSON.
+        elapsed_ms:
+          type: integer
+          description: Wall-clock request duration in milliseconds.
+          minimum: 0
+        url:
+          type: string
+          description: Final URL after any followed redirects.
+      required:
+        - status_code
+        - headers
+        - body
+        - elapsed_ms
+        - url
 
 # Execution metadata and scheduling controls
 metadata:
@@ -156,23 +204,33 @@ metadata:
   # Maximum execution duration (including retries)
   execution_timeout: 60  # 1 minute total
 
-  # Pod placement and network controls
+  # Pod placement and network controls.
+  # connectivity_requirements is the declared egress allowlist the scheduler
+  # compiles into a restrictive OpenShift NetworkPolicy before the pod runs.
   scheduling_controls:
-    # No affinity labels needed (standard worker pool)
+    # No affinity labels needed (standard worker pool).
     affinity_labels: []
 
-    # Network egress requirements
-    # Note: Scheduler auto-extracts hostname from 'url' input
-    # Explicitly declare additional endpoints only if needed
+    # Network egress requirements (NetworkPolicy allowlist).
+    # The scheduler auto-extracts the hostname from the resolved 'url' input and
+    # adds it to this list at compile time. Declare additional endpoints here
+    # only when the request fans out to extra hosts (e.g. redirects, OAuth
+    # token endpoints). Any undeclared destination is denied by the policy.
+    # Entries may be bare destination strings or {host, ports[]} objects that
+    # scope egress to specific ports for a tighter NetworkPolicy rule.
     connectivity_requirements:
-      # Hostname from 'url' is automatically added
-      # Add extra endpoints here if script makes multi-hop requests
+      - host: oauth2.googleapis.com  # OAuth token endpoint for bearer-token auth
+        ports:
+          - port: 443
+            protocol: TCP
 
   # Platform version and capability requirements
   dependencies:
     platformVersion: ">=3.0.0"
     capabilities:
-      - network-egress  # Required for external HTTP requests
+      - network-egress             # Required for external HTTP requests
+      - readonly-root-filesystem   # Pod root FS is immutable; nothing writes to disk
+      - tmpfs-mount                # RAM-backed scratch + injected credential files
 
   # Automatic retry on transient HTTP failures
   retry_policy:

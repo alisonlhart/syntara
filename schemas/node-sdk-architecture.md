@@ -30,9 +30,9 @@ The platform recognizes exactly four categories, defined canonically as `NodeCat
 
 | Category | Purpose | Typical `execution_type` | Examples |
 |----------|---------|--------------------------|----------|
-| `action` | Domain and external API integrations | `container` | `http_request`, AAP Job Templates |
-| `task` | Atomic compute and script executors | `container` | `script_executor` (Python 3.12, Bash 5.2) |
-| `workflow` | In-memory control-plane logic | `in_process` | Loop, Condition, Switch, Converge |
+| `action` | Domain and external API integrations | `container` | `http_request`, `aap_job_template` |
+| `task` | Atomic compute and script executors | `container` | `script-executor` (ANSTRAT-2349; Python 3.12, Bash 5.2) |
+| `workflow` | In-memory control-plane logic | `in_process` | `condition`, `loop`, `switch` |
 | `trigger` | Event entry points | `in_process` | Webhook, Schedule, Manual, `subworkflow_trigger` |
 
 ### Execution Type
@@ -229,8 +229,9 @@ All responses use the platform's standard envelope. Single-resource responses wr
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/api/v1/node-types` | Register (publish) a compiled node definition |
-| `GET` | `/api/v1/node-types` | List registered node types (filter by `category`, `execution_type`, `enabled`) |
-| `GET` | `/api/v1/node-types/{id}` | Fetch a single node type descriptor |
+| `GET` | `/api/v1/node-types` | List registered node types (filter by `category`, `execution_type`, `enabled`; `?view=palette` for the visual-builder drawer) |
+| `GET` | `/api/v1/node-types/{id}` | Fetch a single node type record (the path also accepts a node `name`, resolving to the latest version) |
+| `GET` | `/api/v1/node-types/{id}/descriptor` | Fetch the raw compiled `node-definition.json` (unwrapped) for canvas form rendering |
 | `PATCH` | `/api/v1/node-types/{id}` | Update mutable fields (`enabled`, `image_ref`, `descriptor` for a new version) |
 | `DELETE` | `/api/v1/node-types/{id}` | Remove a node type from the registry |
 
@@ -285,6 +286,45 @@ Response `201 Created`:
 
 **`DELETE /api/v1/node-types/{id}`** — returns `204 No Content` on success, `404` if the id is unknown.
 
+#### Visual-builder views
+
+The React Flow visual builder consumes two projections of the registry, served by
+the same endpoints above so the canvas needs no bespoke API:
+
+**`GET /api/v1/node-types?view=palette`** — the drag-and-drop node drawer summary,
+one entry per node (latest enabled version), in the frontend's camelCase shape.
+`icon` is the optional [`NodePaletteIcon`](common-definitions.json) authored in the
+manifest and carried through compilation, falling back to a per-category default:
+
+```json
+{
+  "data": [
+    {
+      "name": "http_request",
+      "displayName": "HTTP Request",
+      "category": "action",
+      "executionType": "container",
+      "version": "1.0.0",
+      "description": "Non-blocking HTTP/HTTPS API orchestrator with credential injection, response parsing, and automatic retry logic.",
+      "icon": "globe"
+    }
+  ],
+  "meta": { "total": 1, "limit": 50, "offset": 0 }
+}
+```
+
+**`GET /api/v1/node-types/{id}/descriptor`** — returns the compiled
+`node-definition.json` **verbatim and unwrapped** (the one deliberate exception to
+the standard envelope). The canvas renders input forms, default values, field
+groupings, and port bindings directly from this document, so new node types appear
+in the builder with no frontend deployment. The path also accepts a node `name`
+(e.g. `/api/v1/node-types/http_request/descriptor`) as the UI-facing alias for the
+node's latest version.
+
+A runnable reference implementation of these endpoints (register → persist to a
+PostgreSQL JSONB column → advertise) lives in
+[`examples/http-request/test_postgres_registry.py`](examples/http-request/test_postgres_registry.py).
+
 ## Dynamic Dispatch Logic (`dynamic_workflow.py`)
 
 The orchestrator's workflow engine forks execution on a node's `execution_type`. This fork is the boundary between the control plane and the execution plane.
@@ -301,8 +341,8 @@ graph TB
     end
 
     subgraph CONTAINER["container — execution plane (worker pods)"]
-        ACT["action nodes<br/>http_request, AAP templates"]
-        TASK["task nodes<br/>script_executor"]
+        ACT["action nodes<br/>http_request, aap_job_template"]
+        TASK["task nodes<br/>script-executor"]
     end
 
     NODE --> FORK
@@ -386,6 +426,72 @@ Key inspection points, all resolvable without executing the node:
 - **`connectivity_requirements`** — the declared egress allowlist, from which the orchestrator compiles a restrictive NetworkPolicy.
 - **`declared_capabilities`** — SCC / NetworkPolicy tags (e.g., `network-egress`, `script-execution`) validated against cluster policy.
 
+## Policy & Security Enforcement
+
+This section defines how the platform reconciles what a node *wants* with what an environment *allows*, and where each responsibility lives. It reflects the consensus reached during design review.
+
+### The Three-Party Enforcement Model
+
+1. **The node declares what it needs.** Every requirement a node has — credentials, filesystem access, network egress, elevated capabilities, resource ceilings — is stated declaratively in `manifest.yaml`. Collectively these fields form the node's **declared requirements**: `credential_references`, `scheduling_controls` (`connectivity_requirements`, `affinity_labels`), `dependencies.capabilities`, `metadata.workload_classification`, and `resource_requirements`. Nothing a node needs at runtime may be acquired implicitly; if it is not declared, it is denied.
+
+2. **The environment declares what it permits.** Each deployment environment carries its own policy: which capability tags are grantable, which egress destinations are reachable, which credential classes are available, and which resource ceilings apply. This policy is owned by administrators and is independent of any individual node.
+
+3. **The Execution Plane enforces isolation at runtime.** The Execution Plane consumes the intersection of (1) and (2) and compiles it into concrete runtime controls — Kubernetes/OpenShift **NetworkPolicies** (from `connectivity_requirements`), **Security Context Constraints** (from `dependencies.capabilities`), tmpfs credential mounts, and resource limits — then provisions the isolated worker pod under those controls. The control plane never enforces isolation itself; it only resolves and hands off the contract.
+
+**Core design principle:** the responsibility split is fixed and non-negotiable:
+
+1. **Nodes declare requirements** in `manifest.yaml` — the collective **declared requirements** surface (`declaredRequirements` / `scheduling_controls`, plus `credential_references`, `dependencies.capabilities`, and `metadata.workload_classification`). If it is not declared, it is not granted.
+2. **Environments declare allowances** — administrator-owned policy guardrails stating which capabilities, egress destinations, credential classes, and resource ceilings are permitted in that deployment.
+3. **The Execution Plane (ANSTRAT-1803) enforces isolation** at runtime, compiling the intersection of the two into concrete OpenShift pod configurations, volume mounts, and NetworkPolicies.
+
+Declaration and enforcement are deliberately separated so that every requirement is statically auditable (see [Diagram 4](#diagram-4--declared-capabilities--permission-manifest)) before any pod is ever provisioned.
+
+### Schema Research Benchmark: the External `ansible-playbook` Parameter Model
+
+During SDK design research we used the external `ansible-playbook` parameter model as a worst-case expressiveness benchmark, because it declares an unusually rich requirement surface in a single interface. We mapped each of its declarative concepts onto our own manifest constructs to confirm the SDK could represent them:
+
+| External `ansible-playbook` concept (studied) | How our `manifest.yaml` would express it |
+|---|---|
+| `extra_vars` (typed run parameters) | `inputs.properties` (typed, with `required` / `enum` / `pattern`) |
+| Inventory / target hosts | `inputs.properties` values plus declared egress in `scheduling_controls.connectivity_requirements` |
+| SSH keys, vault passwords (multiple heterogeneous secrets) | multiple `credential_references` (`CredentialReference`), resolved to `tmpfs` at runtime — never in the manifest |
+| Target host networking (multi-hop egress) | `scheduling_controls.connectivity_requirements` compiled to a NetworkPolicy allowlist |
+| Module privileges (e.g. file writes) | `dependencies.capabilities` (`file-write`, `script-execution`, …) realized as SCCs |
+
+The conclusion of that research: our `manifest.yaml` schema is expressive enough to model even this dense external parameter structure without extension. 
+
+**Our actual task-node benchmark — `script-executor` (ANSTRAT-2349).** For the real security and policy discussion below we anchor on `script-executor`, the platform's actual `task` node for isolated container execution. It runs deterministic Python 3.12 / Bash 5.2 in an isolated worker pod under the declare-then-enforce model, with a bounded requirement surface (typically `script-execution` capability and a small egress allowlist). Where the external `ansible-playbook` schema was a research stress test of *schema expressiveness*, `script-executor` is the concrete node whose *runtime enforcement* the model must serve.
+
+### Consolidated Resource & Credential Handling
+
+**No plaintext secrets, ever.** No raw API key, password, token, or secret material is stored in a node definition (`manifest.yaml` or the compiled `node-definition.json`) or passed through the control-plane scheduler. Nodes reference credentials exclusively through abstract UUID references (`CredentialReference`). At dispatch time the Execution Plane resolves the `credential_id`, decrypts the vault entry, and injects it directly into worker-pod memory / tmpfs (`credential_mount_type: env | file`). File mounts are RAM-backed and deleted on container exit. Error diagnostics (`ErrorMessage`) are scrubbed of credentials before persistence.
+
+**Runtime classification taxonomy (`execution_type`).** The `execution_type` field decides *where* a node runs and, by extension, its isolation posture:
+
+| `execution_type` | Runs as | Node categories | Pod overhead | Examples |
+|---|---|---|---|---|
+| `in_process` | Temporal activities directly inside the control plane | `workflow`, `trigger` | None | `subworkflow_trigger`, `condition`, `loop`, `switch` |
+| `container` | Isolated OCI worker pods on the Execution Plane | `action`, `task` | One pod per execution | `http_request`, `aap_job_template`, `script-executor` |
+
+`in_process` nodes are trusted control-plane logic with zero pod overhead; they perform no user or integration I/O and therefore need no sandbox. `container` nodes run user or integration code and are always sandboxed.
+
+**Security classification (`workload_classification`).** Orthogonal to *where* a node runs is *what class of credentials it may request*:
+
+- **`action`** — scripted, deterministic execution. May request infrastructure credentials (SSH, cloud API keys, vault access).
+- **`agentic`** — LLM-driven, non-deterministic execution. **Restricted from requesting high-privilege infrastructure credentials.** This containment is deliberate: it prevents a prompt-injection attack against an AI agent node from escalating into infrastructure compromise. `agentic` nodes are still eligible for scoped, lower-privilege credentials as permitted by the environment.
+
+## Scope & System Ownership Matrix
+
+The consensus below fixes the boundaries of this initiative's **SDK & Contracts scope** so that downstream implementation teams have unambiguous handoff points. This document (and the artifacts it specifies) is authoritative for the SDK & Contracts scope only; the other two scopes are owned elsewhere and are described here solely to define the boundary.
+
+| Scope | Owns | Explicitly out of scope for this doc |
+|---|---|---|
+| **SDK & Contracts** (ANSTRAT-2422) | Draft-07 platform meta-schema (`common-definitions.json`); authoring manifest spec (`manifest.yaml`); compiled DB descriptor contract (`node-definition.json`); database DDL and REST API *specifications*; reference package prototypes under `schemas/examples/` | Backend implementation; runtime enforcement |
+| **Core Backend Implementation** (unknown scope) | Official Alembic migrations for `node_types`; `/api/v1/node-types` FastAPI routers; the two-tier `NodeTypeRegistry` L1/L2 Redis cache; updating `dynamic_workflow.py` for dynamic DB dispatch | Schema/contract authorship (consumes this doc); pod sandboxing |
+| **Execution Plane** (ANSTRAT-1803) | Pod sandboxing; OpenShift worker container orchestration; runtime NetworkPolicy / SCC enforcement compiled from declared requirements | Contract shape (consumes the handoff contract); registry storage |
+
+The DDL, `NodeTypeDescriptor` SQLModel, and REST API tables earlier in this document are **specifications** produced by the SDK & Contracts scope. Turning them into shipped Alembic migrations and live FastAPI routers is Core Backend Implementation work; compiling declared requirements into live cluster policy is Execution Plane work.
+
 ## Schema Reference
 
 ### Platform Meta-Schema
@@ -438,3 +544,30 @@ Every compiled `node-definition.json` declares, at minimum:
 - **`subworkflow_trigger`** manifest declares `category: trigger` + `execution_type: in_process`
 
 These pairings are validated during `ao-sdk validate` and enforced by the registry's table constraints.
+
+## Open Questions & Architectural Roadmap
+
+The following are active, unresolved questions.
+
+
+- **Backend changes needed.** The following changes are currently expected as part of the SDK structure. We need to determine what is possible, feasible, and within the scope of ANSTRAT-2422 to require, implement, or pass to a separate feature.
+  - **Database Migration (Alembic):**
+   - **Task:** Create the official Alembic migration script in `syntara-backend` to instantiate the `node_types` table, `JSONB` descriptor column, `image_ref` `CHECK` constraint, and `GIN` index.
+   - **Ownership:** Core Backend Team.
+
+  - **Registry REST API (`/api/v1/node-types`):**
+   - **Task:** Implement the FastAPI router endpoints (`POST` for node publishing/registration, `GET` for fetching compiled `node-definition.json` descriptors for sub-500ms React Flow canvas rendering).
+   - **Ownership:** Core Backend / Control Plane Team.
+
+  - **Two-Tier Registry Caching (`NodeTypeRegistry`):**
+   - **Task:** Implement the L1 (in-memory) and L2 (Redis) caching layer to resolve node definitions at workflow execution time without hitting PostgreSQL on every step.
+   - **Ownership:** Core Backend Team.
+
+  - **Dynamic Dispatcher Integration (`dynamic_workflow.py`):**
+   - **Task:** Update `dynamic_workflow.py` and `WorkflowValidator` to query the database/Redis registry dynamically instead of checking hardcoded Python enums.
+   - **Ownership:** Core Backend Engine Team.
+
+
+- **Permission degradation strategy.** When an environment denies a requirement a node has declared, what is the correct AppOps behavior? Options range from hard-fail-at-deploy to fine-grained graceful degradation (e.g., disabling only the affected capability while running the rest of the node). A degradation policy needs to be defined per capability class rather than globally.
+- **Multi-tenant credential scoping for sub-workflow callers.** When a `subworkflow_trigger` invokes a child workflow across tenant or ownership boundaries, whose credential scope applies — the caller's, the callee's, or an explicitly narrowed intersection? The parent↔child ingress contract does not yet model credential-scope inheritance.
+- **Dynamic rate-limiting and egress throttling per node type.** `connectivity_requirements` currently expresses *which* destinations are reachable but not *how much* traffic is permitted. Per-node-type rate limiting and egress throttling (e.g., requests/sec or bytes/sec ceilings compiled alongside the NetworkPolicy) are candidates for a future revision of `scheduling_controls`.

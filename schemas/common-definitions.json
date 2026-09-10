@@ -56,7 +56,7 @@
         },
         "capabilities": {
           "type": "array",
-          "description": "Standardized security clearance tags mapped to OpenShift Security Context Constraints and NetworkPolicies. The scheduler validates these against the cluster's security policy. Failure to declare required capabilities results in runtime permission denials.",
+          "description": "Standardized security clearance tags mapped to OpenShift Security Context Constraints and NetworkPolicies. The scheduler validates these against the cluster's security policy. Failure to declare required capabilities results in runtime permission denials. Filesystem-isolation tags: 'readonly-root-filesystem' pins the pod's root filesystem read-only (SecurityContext.readOnlyRootFilesystem=true); 'tmpfs-mount' grants an ephemeral, RAM-backed tmpfs volume for scratch space and injected credential files.",
           "items": {
             "type": "string",
             "enum": [
@@ -66,7 +66,9 @@
               "file-write",
               "privileged-ports",
               "host-network",
-              "kernel-modules"
+              "kernel-modules",
+              "readonly-root-filesystem",
+              "tmpfs-mount"
             ]
           },
           "uniqueItems": true,
@@ -205,26 +207,42 @@
         },
         "connectivity_requirements": {
           "type": "array",
-          "description": "External hostnames, FQDNs, or IP addresses that the task requires network egress to. The scheduler dynamically compiles OpenShift NetworkPolicies allowing TCP egress strictly to these endpoints. Supports DNS names (resolved at policy compile time) and CIDR blocks. Failure to declare required endpoints causes connection timeouts.",
+          "description": "Declared egress allowlist for multi-destination NetworkPolicy compilation. Each entry is either a bare destination string (hostname, FQDN, IPv4 address, or IPv4 CIDR block) or an object pairing a destination with explicit port/protocol specifications. The execution plane dynamically compiles OpenShift NetworkPolicies allowing egress strictly to these endpoints (and, where specified, only to the declared ports); any undeclared destination is denied. Failure to declare a required endpoint causes connection timeouts.",
           "items": {
             "oneOf": [
               {
                 "type": "string",
-                "format": "hostname",
-                "description": "DNS hostname or FQDN",
-                "examples": ["api.github.com", "registry.npmjs.org", "pypi.org"]
+                "description": "Destination hostname, FQDN, IPv4 address, or IPv4 CIDR block. Egress is permitted on all ports unless narrowed via the object form.",
+                "pattern": "^(\\*\\.)?[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(/\\d{1,2})?$",
+                "examples": ["api.github.com", "registry.npmjs.org", "192.168.1.100", "10.0.0.0/8"]
               },
               {
-                "type": "string",
-                "format": "ipv4",
-                "description": "IPv4 address",
-                "examples": ["10.0.0.1", "192.168.1.100"]
-              },
-              {
-                "type": "string",
-                "pattern": "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}/\\d{1,2}$",
-                "description": "IPv4 CIDR block",
-                "examples": ["10.0.0.0/8", "192.168.1.0/24"]
+                "type": "object",
+                "description": "A destination paired with explicit port/protocol specifications, compiled into a tightly scoped NetworkPolicy egress rule.",
+                "properties": {
+                  "host": {
+                    "type": "string",
+                    "description": "Target hostname, FQDN, IPv4 address, or IPv4 CIDR block.",
+                    "minLength": 1,
+                    "examples": ["oauth2.googleapis.com", "10.0.0.0/8"]
+                  },
+                  "ports": {
+                    "type": "array",
+                    "description": "Permitted destination ports for this host. Each entry is a port number with an optional transport protocol (defaults to TCP).",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                        "protocol": { "type": "string", "enum": ["TCP", "UDP"], "default": "TCP" }
+                      },
+                      "required": ["port"],
+                      "additionalProperties": false
+                    },
+                    "minItems": 1
+                  }
+                },
+                "required": ["host", "ports"],
+                "additionalProperties": false
               }
             ]
           },
@@ -258,35 +276,85 @@
       "default": "action"
     },
 
+    "NodePaletteIcon": {
+      "type": "string",
+      "title": "Node Palette Icon",
+      "description": "Optional glyph shown beside the node in the React Flow visual builder's drag-and-drop palette drawer, interpreted as a PatternFly / Font Awesome icon name. Authored in the manifest and carried through compilation into the node-definition.json descriptor so the palette can render it without a frontend deployment. When omitted, the UI falls back to a per-category default icon.",
+      "pattern": "^[a-z0-9-]+$",
+      "examples": ["globe", "terminal", "bolt", "project-diagram"]
+    },
+
     "CredentialReference": {
       "type": "object",
       "title": "Credential Reference",
-      "description": "Declarative reference to a platform-managed credential. The node never receives raw secrets. Instead, the scheduler resolves the credential_id at runtime, decrypts the vault entry, and injects it via the specified mount type. This prevents credential leakage in workflow definitions and audit logs.",
+      "description": "Declarative, UUID-based reference to a platform-managed credential. The node never receives or stores raw secrets: only the abstract credential_id is persisted in the manifest and compiled descriptor. At dispatch time the execution plane resolves the credential_id, decrypts the vault entry, and injects it via the requested mount type into ephemeral, RAM-backed storage. This prevents credential leakage in workflow definitions, the control-plane scheduler, and audit logs.",
       "properties": {
         "credential_id": {
           "type": "string",
           "format": "uuid",
-          "description": "UUID of the credential stored in the platform's encrypted vault. Validated at workflow deployment time to ensure the credential exists and is accessible to the workflow owner.",
+          "description": "UUID of the credential stored in the platform's encrypted vault. This UUID is the sole secret abstraction: no plaintext secret, key, or token may appear in a node definition. Validated at workflow deployment time to ensure the credential exists and is accessible to the workflow owner.",
           "examples": ["550e8400-e29b-41d4-a716-446655440000"]
         },
         "credential_mount_type": {
           "type": "string",
-          "description": "How the resolved credential should be injected into the container. 'env': Mounted as environment variables (suitable for API keys, tokens). 'file': Written to a RAM-backed tmpfs mount (suitable for SSH keys, certificates, kubeconfigs). File mounts are deleted on container exit.",
-          "enum": ["env", "file"],
+          "description": "How the resolved credential is injected into the worker pod. 'env': environment variable (API keys, tokens). 'file': written to a RAM-backed tmpfs file at credential_mount_path. 'tmpfs_file': explicit ephemeral, RAM-backed file mount for sensitive material such as SSH private keys or vault password files (e.g. /tmp/id_rsa) — never touches disk and is deleted on container exit. 'header': injected as the HTTP request header named by credential_header_name for authenticated API nodes. File and tmpfs_file mounts are removed when the container exits.",
+          "enum": ["env", "file", "tmpfs_file", "header"],
           "default": "env"
         },
         "credential_mount_path": {
           "type": "string",
-          "description": "Target path for 'file' mount type. Must be an absolute path. The scheduler creates a tmpfs volume at this location and writes the credential file(s). Only applicable when credential_mount_type='file'. Ignored for 'env' mounts.",
+          "description": "Absolute target path for 'file' and 'tmpfs_file' mount types. The execution plane creates a RAM-backed tmpfs volume at this path and writes the credential file(s) into it (e.g. an SSH key at /tmp/id_rsa or a vault password file). Required for 'tmpfs_file'; ignored for 'env' and 'header' mounts.",
           "pattern": "^/[a-zA-Z0-9/_.-]+$",
-          "examples": ["/tmp/credentials", "/run/secrets/ssh-key"]
+          "examples": ["/tmp/id_rsa", "/run/secrets/vault-password", "/run/secrets/ssh-key"]
+        },
+        "credential_header_name": {
+          "type": "string",
+          "description": "HTTP header name that carries the resolved secret when credential_mount_type='header' (e.g. 'Authorization', 'X-API-Key'). Ignored for all other mount types.",
+          "pattern": "^[A-Za-z0-9-]+$",
+          "examples": ["Authorization", "X-API-Key"]
+        },
+        "allowed_workload_classifications": {
+          "type": "array",
+          "description": "Authorization scope carried on the credential reference itself: the set of node workload_classification values permitted to request it. High-privilege infrastructure credentials should set ['action'] so that non-deterministic 'agentic' nodes cannot acquire them, preventing prompt-injection escalation to infrastructure. Defaults to permitting both classifications when omitted.",
+          "items": { "$ref": "#/definitions/WorkloadClassification" },
+          "uniqueItems": true,
+          "default": ["action", "agentic"]
         }
       },
       "required": ["credential_id"],
       "additionalProperties": false,
       "dependencies": {
-        "credential_mount_path": ["credential_mount_type"]
+        "credential_mount_path": ["credential_mount_type"],
+        "credential_header_name": ["credential_mount_type"]
       }
+    },
+
+    "CredentialReferenceList": {
+      "type": "array",
+      "title": "Credential Reference List",
+      "description": "An ordered list of CredentialReference entries, allowing a single node to declare multiple simultaneous credentials (for example an SSH key, a cloud API token, and a vault password), each with its own mount type, mount path, and authorization scope.",
+      "items": { "$ref": "#/definitions/CredentialReference" },
+      "default": []
+    },
+
+    "NodeInputs": {
+      "type": "object",
+      "title": "Node Inputs",
+      "description": "Draft-07 sub-schema describing a node's typed input properties, rendered as canvas form fields. Supports flat primitives, dynamic nested JSON/YAML objects (such as arbitrary key/value maps or host lists), oneOf/anyOf unions, and typed arrays. 'properties' maps each input name to its JSON Schema; 'required' lists the mandatory input names.",
+      "properties": {
+        "properties": {
+          "type": "object",
+          "description": "Map of input name to its JSON Schema definition. A value may itself be a nested object, a typed array, or a oneOf/anyOf union — not only a flat primitive."
+        },
+        "required": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true,
+          "default": []
+        }
+      },
+      "required": ["properties"],
+      "additionalProperties": true
     }
   }
 }
